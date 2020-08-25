@@ -1,0 +1,551 @@
+#!/usr/bin/env bash
+#### Provide end date in YYYY-MM-DD format
+ENVIRONMENT=${1}
+REGION=${2}
+xfactor=${3}
+EMR_IP=${4}
+bulk_load=${5}
+end_date=${6}
+
+echo "Input arguments provided : $@"
+if [ -z ${ENVIRONMENT} ]
+then
+    echo "Environment is not provided. Exiting"
+    exit -1
+fi
+
+if [ -z ${REGION} ]
+then
+    echo "Region is not provided. Exiting"
+    exit -1
+fi
+
+if [ $# -lt 2 ] ; then
+    echo "Incorrect number of arguments passed!!"
+    echo "9th argument should be environment to this script"
+    echo "format: run_amz_connect_load_stg_ctr.sh [Environment(prd/dev)] [Region(ap-southeast-2/us-west-2/us-east-1/eu-central-1)]"
+    echo "Exiting..."
+    exit -1
+fi
+
+################## Setup environment paths ###################
+
+BASE_DIR=/appDac2/scripts/shell
+APP_NAME=amazon_connect
+EMR_BASE_DIR=/home/hadoop
+EMR_APP_DIR=${EMR_BASE_DIR}/${APP_NAME}
+EMR_LOG_DIR=${EMR_BASE_DIR}/${APP_NAME}/logs
+LOG_FILE_NAME=${EMR_LOG_DIR}/${APP_NAME}_emr_deploy.log
+S3_RELEASE_PATH=s3://idl-t4ieda-artifacts-uw2-processing-t4idna-$ENVIRONMENT/amazon_connect
+EMR_IP_CFG_FILE=/appDac2/parm/emr_ip.cfg
+DT_TM=`date +"%Y-%m-%d"`
+
+#############################################################
+
+
+function download()
+{
+        source_loc=${1}
+        target_loc=${2}
+        aws s3 cp ${source_loc} ${target_loc} --quiet
+}
+
+#############################################################
+download "${S3_RELEASE_PATH}/config/amz_connect_source.config" ${BASE_DIR}
+source ${BASE_DIR}/amz_connect_source.config
+s3_cp_script_name=run_amz_connect_ctr_s3_cp.sh
+
+region_l=`echo ${REGION} | tr '[:upper:]' '[:lower:]'`
+case ${region_l} in
+    ap-southeast-2)
+        cmd="${BASE_DIR}/${s3_cp_script_name} ${config_file_name} ${ap_southeast_region_name} ${stg_ctr_ap_southeast_db_process_name} ${stg_ctr_ap_southeast_src_bucket_name} ${stg_ctr_ap_southeast_src_prefix} ${stg_dest_bucket_name} ${stg_ctr_dest_prefix} ${stg_ctr_table_name} ${ENVIRONMENT} $xfactor $bulk_load $end_date $EMR_IP"
+        echo "Running => $cmd"
+        $cmd
+        ;;
+    us-east-1)
+        cmd="${BASE_DIR}/${s3_cp_script_name} ${config_file_name} ${us_east_1_region_name} ${stg_ctr_us_east_1_db_process_name} ${stg_ctr_us_east_1_src_bucket_name} ${stg_ctr_us_east_1_src_prefix} ${stg_dest_bucket_name} ${stg_ctr_dest_prefix} ${stg_ctr_table_name} ${ENVIRONMENT} $xfactor $bulk_load $end_date $EMR_IP"
+        echo "Running => $cmd"
+        $cmd
+        ;;
+    eu-central-1)
+        cmd="${BASE_DIR}/${s3_cp_script_name} ${config_file_name} ${eu_central_region_name} ${stg_ctr_eu_central_db_process_name} ${stg_ctr_eu_central_src_bucket_name} ${stg_ctr_eu_central_src_prefix} ${stg_dest_bucket_name} ${stg_ctr_dest_prefix} ${stg_ctr_table_name} ${ENVIRONMENT} $xfactor $bulk_load $end_date $EMR_IP"
+        echo "Running => $cmd"
+        $cmd
+        ;;
+    us-west-2)
+        cmd="${BASE_DIR}/${s3_cp_script_name} ${config_file_name} ${us_west_2_region_name} ${stg_ctr_us_west_2_db_process_name} ${stg_ctr_us_west_2_src_bucket_name} ${stg_ctr_us_west_2_src_prefix} ${stg_dest_bucket_name} ${stg_ctr_dest_prefix} ${stg_ctr_table_name} ${ENVIRONMENT} $xfactor $bulk_load $end_date $EMR_IP"
+        echo "Running => $cmd"
+        $cmd
+        ;;
+    *)
+        echo "Incorrect Region. Please check input args"
+        exit -1
+        ;;
+esac
+
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+Script Name: run_amz_connect_ctr_s3_cp.sh
+
+#!/usr/bin/env bash
+
+#### Provide end date in YYYY-MM-DD format
+config_file=${1}
+echo $config_file
+region=${2}
+echo $region
+db_process_name=${3}
+src_bucket=${4}
+src_dir=${5}
+dest_bucket=${6}
+dest_dir=${7}
+stg_table=${8}
+ENVIRONMENT=${9}
+xfactor=${10}
+bulk_load=${11}
+end_date=${12}
+EMR_IP=${13}
+
+################## Setup environment paths ###################
+
+BASE_DIR=/appDac2/scripts/shell
+APP_NAME=amazon_connect
+EMR_BASE_DIR=/home/hadoop
+EMR_APP_DIR=${EMR_BASE_DIR}/${APP_NAME}
+EMR_LOG_DIR=${EMR_BASE_DIR}/${APP_NAME}/logs
+LOG_FILE_NAME=${EMR_LOG_DIR}/${APP_NAME}_emr_deploy.log
+S3_RELEASE_PATH=s3://idl-t4ieda-artifacts-uw2-processing-t4idna-$ENVIRONMENT/amazon_connect
+EMR_IP_CFG_FILE=/appDac2/parm/emr_ip.cfg
+DT_TM=`date +"%Y-%m-%d"`
+
+#############################################################
+
+
+function download()
+{
+        source_loc=${1}
+        target_loc=${2}
+        aws s3 cp ${source_loc} ${target_loc} --quiet
+}
+
+function get_pem_file_name()
+{
+    download "${S3_RELEASE_PATH}/config/environment.cfg" ${BASE_DIR}
+    EMR_PEM=`cat ${BASE_DIR}/environment.cfg | grep pem | tail -1 | awk -F'|' '{print $2}'`
+    if [[ -z "$EMR_PEM" ]]; then
+        echo "PEM file name is not found in ${S3_RELEASE_PATH}/config/environment.cfg. Please check "
+        exit 1
+    fi
+    echo $EMR_PEM
+}
+
+
+#############################################################
+echo "Process Started. Number of arguments are "$#
+if [ $# -lt 9 ] ; then
+    echo "Incorrect number of arguments passed!!"
+    echo "9th argument should be environment to this script"
+    echo "format: .run_amz_connect_s3_cp [conf file] [region] [audit_process_name] [src_bucket] [src_dir] [dest_bucket] [dest_dir] [stg_table]"
+    echo "Exiting..."
+    exit -1 
+fi 
+
+run_command="/app/iac-etl/env-2.0.2/bin/python /home/hadoop/amazon_connect/scripts/python/ctr_s3_cp_utility.py --config_file=${config_file} --region=${region} --db_process_name=${db_process_name} --src_bucket=${src_bucket} --src_dir=${src_dir} --dest_bucket=${dest_bucket} --dest_dir=${dest_dir} --stg_table=${stg_table} --bulk_load=${bulk_load} --end_date=${end_date} --xfactor=${xfactor}"
+echo $run_command
+
+if [ -z "$EMR_IP" ]
+then
+    EMR_IP_CFG_FILE=/appDac2/parm/emr_ip.cfg
+    TMP_EMR_IP_CFG="/tmp/emr_ip_amazon_connect_$3_${DT_TM}"
+    >"$TMP_EMR_IP_CFG"
+    echo "tmp emr ip cfg path is " $TMP_EMR_IP_CFG
+    if [ -s "$EMR_IP_CFG_FILE" ]; then
+     echo "EMR IP config file exists $EMR_IP_CFG_FILE, downloading the EMR IP from S3 config file"
+     EMR_IP_CFG_S3_FILE=`grep EMR_CFG_FILE "$EMR_IP_CFG_FILE" | head -1 | awk -F'=' '{print $2}'`
+     aws s3 cp "$EMR_IP_CFG_S3_FILE" "$TMP_EMR_IP_CFG"
+     EMR_IP=`cat "$TMP_EMR_IP_CFG" | grep amazon_connect | tail -1 | awk -F '|' '{print $3}'`
+     if [ -n "$EMR_IP" ]; then
+     echo "This deploy job will be run on cluster with master node IP : $EMR_IP"
+     else
+      echo "EMR IP config file does not have an IP address in it!!"
+      exit 1
+     fi
+     rm "$TMP_EMR_IP_CFG"
+    else
+     echo "EMR IP config file does not exists!!"
+     exit 1
+    fi
+fi
+echo "This deploy job will be run on cluster with master node IP : $EMR_IP"
+
+EMR_PEM=`get_pem_file_name`
+ssh -o StrictHostKeyChecking=no  -i /appDac2/${EMR_PEM} hadoop@$EMR_IP<<EOF
+pwd
+whoami
+uname -n
+export PYSPARK_PYTHON=/app/iac-etl/env-2.0.2/bin/python
+
+$run_command
+EOF
+
+EXIT_STATUS=$?
+echo "Process completed with exit code : $EXIT_STATUS"
+exit $EXIT_STATUS
+
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+import os
+import sys
+from amz_connect_db_helper  import *
+import argparse
+import logging
+from datetime import datetime
+from logging_helper import AMZCNLOGGING
+import common_helper
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Arguments required to run amz_connect_s3_ctr_cp_utility')
+    parser.add_argument('--config_file', help='config_file', action='store', dest='config_file', required=True)
+    parser.add_argument('--region', help='region', action='store', dest='region', required=True)
+    parser.add_argument('--db_process_name', help='db process name or table name',required=True)
+    parser.add_argument('--src_bucket', help='src_bucket', action='store', dest='src_bucket', required=True)
+    parser.add_argument('--src_dir', help='src_dir', action='store', dest='src_dir', required=True)
+    parser.add_argument('--dest_bucket', help='dest_bucket', action='store', dest='dest_bucket', required=True)
+    parser.add_argument('--dest_dir', help='dest_dir', action='store', dest='dest_dir', required=True)
+    parser.add_argument('--stg_table', help='', action='store', dest='stg_table', required=True)
+    parser.add_argument('--bulk_load', help='Optional - Y -> Bullk load N->Incremental load', action='store', dest='bulk_load', required=False,default = None)
+    parser.add_argument('--end_date', help='Optional - Date Format <YYYY-MM-DD>', action='store', dest='end_date', required=False,default = None)
+    parser.add_argument('--xfactor',  help='Optional - Provide T-shirt size to xfactor resource for spark submit. Options- S,M,L,XL,XXL',action ='store', dest='xfactor', default='S')
+    return parser.parse_args()
+
+def getGroupLogger(app_name,process_name,log_file_name):
+    log_helper=AMZCNLOGGING(app_name,process_name,log_file_name).getLogger()
+    return log_helper
+
+def get_spark_args(tshirt_size):
+    Tshirt_size_S= " --driver-memory 8g --num-executors 8 --executor-memory 8g --conf spark.executor.memoryOverhead=2048 --conf spark.executor.cores=5 --conf spark.driver.maxResultSize=0 --conf spark.yarn.maxAppAttempts=4 --conf spark.dynamicAllocation.enabled=false --conf spark.sql.parquet.writeLegacyFormat=true "
+    Tshirt_size_M= " --driver-memory 10g --num-executors 12 --executor-memory 12g --conf spark.executor.memoryOverhead=2048 --conf spark.executor.cores=5 --conf spark.driver.maxResultSize=0 --conf spark.yarn.maxAppAttempts=4 --conf spark.dynamicAllocation.enabled=false --conf spark.sql.parquet.writeLegacyFormat=true "
+    Tshirt_size_L= " --driver-memory 12g --num-executors 14 --executor-memory 16g --conf spark.executor.memoryOverhead=2048 --conf spark.executor.cores=5 --conf spark.driver.maxResultSize=0 --conf spark.yarn.maxAppAttempts=4 --conf spark.dynamicAllocation.enabled=false --conf spark.sql.parquet.writeLegacyFormat=true "
+    Tshirt_size_XL= " --driver-memory 20g --num-executors 16 --executor-memory 20g --conf spark.executor.memoryOverhead=4096 --conf spark.executor.cores=5 --conf spark.driver.maxResultSize=0 --conf spark.yarn.maxAppAttempts=4 --conf spark.dynamicAllocation.enabled=false --conf spark.sql.parquet.writeLegacyFormat=true "
+    Tshirt_size_XXL= " --driver-memory 24g --num-executors 20 --executor-memory 24g --conf spark.executor.memoryOverhead=4096 --conf spark.executor.cores=5 --conf spark.driver.maxResultSize=0 --conf spark.yarn.maxAppAttempts=4 --conf spark.dynamicAllocation.enabled=false --conf spark.sql.parquet.writeLegacyFormat=true "
+    tshirtsize_spark_parameter = Tshirt_size_S
+    if tshirt_size != '':
+        if tshirt_size.lower() == 'l'.lower():
+            tshirtsize_spark_parameter = Tshirt_size_L
+        elif tshirt_size.lower() == 'm'.lower():
+            tshirtsize_spark_parameter = Tshirt_size_M
+        elif tshirt_size.lower() == 'xl'.lower():
+            tshirtsize_spark_parameter = Tshirt_size_XL
+        elif tshirt_size.lower() == 'xxl'.lower():
+            tshirtsize_spark_parameter = Tshirt_size_XXL
+        else:
+            tshirtsize_spark_parameter = Tshirt_size_S
+    log_helper.debug("Amazon connect stg_ctr would run with t-shift size as {}".format(tshirt_size))
+    return(tshirtsize_spark_parameter)
+
+def main():
+    log_helper.info("Input Arguments are %s"%args)
+    config=AmzConnectConfig(args.config_file)
+    readDb_obj=DBHELPER(config,args.db_process_name,log_helper)
+    status=readDb_obj.checkIfIsRunning()
+
+    if status==1:
+        log_helper.info("Get last extract date for {} from audit table".format(args.db_process_name))
+        extract_date=readDb_obj.getExtractRunData()
+        assert extract_date is not None, "Last extract date is NONE in audit table"
+
+        input_year=extract_date[0]
+        input_month='%02d'%(extract_date[1])
+        input_day='%02d'%(extract_date[2])
+        input_hour=extract_date[3]
+        input_mins=extract_date[4]
+        input_secs=extract_date[5]
+
+        (audit_process_key, extractdate)=readDb_obj.insertAuditRecord(input_year,input_month,input_day,input_hour,input_mins,input_secs)
+        log_helper.info("AUDIT_PROCESS_KEY with current running status %s"%audit_process_key)
+        assert readDb_obj is not None, "readDb_obj is none after insertAuditRecord"
+
+        log_helper.info("Running spark job to load data into S3 ......")
+        script_args = "/home/hadoop/amazon_connect/scripts/python/ctr_s3_cp.py --src_bucket={} --src_dir={} --dest_bucket={} --dest_dir={} --region={} --stg_table={} --year={} --month={} --day={} --hour={} --mins={} --secs={} --log_file_name={} --bulk_load={} --end_date={}".format(args.src_bucket,args.src_dir,args.dest_bucket,args.dest_dir,args.region,args.stg_table,input_year,input_month,input_day,input_hour,input_mins,input_secs,LogFileName,args.bulk_load,args.end_date)
+        cmd="spark-submit {}  {}".format(get_spark_args(args.xfactor),script_args)
+        log_helper.info("Running Command => %s"%cmd)
+        return_status, stdout, stderr=common_helper.run_cmd(cmd)
+        log_helper.info("RETURN CODE from spark job is %s"%return_status)
+        log_helper.info("Spark job stdout => %s"%stdout)
+        log_helper.info("Spark job stderr => %s"%stderr)
+        
+        if return_status==0:
+            '''read extr_end_date from file or return from main'''
+            end_date_file_path="/home/hadoop/amazon_connect/temp/stg_ctr_data_extract_end_date_{}.txt".format(args.region)
+            log_helper.debug("tmp file storing end_date_file_path is %s"%end_date_file_path)
+            try:
+                fh=open(end_date_file_path)
+                extr_end_date=fh.read()
+                fh.close()
+            except IOError:
+                log_helper.debug("tmp file storing end_date is not found %s"%end_date_file_path)
+
+            log_helper.debug("EXTR_END_DATE from file is %s"%extr_end_date)
+            extr_end_date=extr_end_date[0:len(extr_end_date)-6]
+            log_helper.info("EXTR_END_DATE after formatting from utc to oracle timestamp %s"%extr_end_date)
+
+        if return_status==0:
+            log_helper.info("STG_CTR load is success make an entry to audit_process_log")
+            readDb_obj.updateAuditAtSuccessExtTime(audit_process_key,extr_end_date)
+            sys.exit(0)
+        elif return_status==99:
+            log_helper.info("Source S3 path is empty")
+            readDb_obj.updateAuditWithSrcEmpty(audit_process_key)
+            sys.exit(0)
+        else:
+            log_helper.exception("STG_CTR load is not success and updating the status to Error")
+            readDb_obj.updateAuditAtFailure(audit_process_key)
+            sys.exit(-1)
+
+    else:
+        log_helper.info("Another instance is running for table %s"%args.db_process_name)
+        sys.exit(-1)
+
+
+if __name__ == '__main__':
+    args=get_args()
+    app_name="amazon_connect"
+    process_name="load_stg_{}".format(args.db_process_name)
+    current_datetime=datetime.now().strftime('%Y%m%d%H%M%S')
+    LogHome="/home/hadoop/amazon_connect/logs"
+    LogFileName="{}/{}.{}.{}.log".format(LogHome, app_name, process_name , current_datetime)
+    log_helper = getGroupLogger(app_name,process_name,LogFileName)
+    main()
+
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+#@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+from boto3 import session
+from datetime import datetime,timedelta
+from dateutil import tz
+from pyspark.sql import SparkSession
+from dateutil.tz import tzlocal
+import argparse
+import logging
+from logging_helper import AMZCNLOGGING
+import common_helper
+import boto3
+from pyspark.sql import functions as F
+from pyspark.sql.functions import desc
+from pyspark.sql.window import Window
+import sys
+import os
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Arguments required to cp s3 files for stg_ctr')
+    parser.add_argument('--region', help='region', action='store', dest='region', required=True)
+    parser.add_argument('--src_bucket', help='src_bucket', action='store', dest='src_bucket', required=True)
+    parser.add_argument('--src_dir', help='src_dir', action='store', dest='src_dir', required=True)
+    parser.add_argument('--dest_bucket', help='dest_bucket', action='store', dest='dest_bucket', required=True)
+    parser.add_argument('--dest_dir', help='dest_dir', action='store', dest='dest_dir', required=True)
+    parser.add_argument('--stg_table', help='stg_table', action='store', dest='stg_table', required=True)
+    parser.add_argument('--year', help='input_year', action='store', dest='year', required=True)
+    parser.add_argument('--month', help='month', action='store', dest='month', required=True)
+    parser.add_argument('--day', help='day', action='store', dest='day', required=True)
+    parser.add_argument('--hour', help='hour', action='store', dest='hour', required=True)
+    parser.add_argument('--mins', help='mins', action='store', dest='mins', required=True)
+    parser.add_argument('--secs', help='secs', action='store', dest='secs', required=True)
+    parser.add_argument('--log_file_name', help='Log file Name', action='store', dest='log_file_name', required=False,default = None)
+    parser.add_argument('--bulk_load', help='Y -> Bullk load N->Incremental load', action='store', dest='bulk_load', required=False,default = None)
+    parser.add_argument('--end_date', help='<YYYY-MM-DD>', action='store', dest='end_date', required=False,default = None)
+    return parser.parse_args()
+
+def getGroupLogger(app_name,process_name,log_file_name):
+    log_helper=AMZCNLOGGING(app_name,process_name,log_file_name).getLogger()
+    return log_helper
+
+def create_spark_session(spark_application_name):
+    spark = SparkSession.builder.appName(spark_application_name).enableHiveSupport().getOrCreate()
+    spark.conf.set("spark.sql.hive.convertMetastoreParquet", "false")
+    spark.conf.set("mapred.input.dir.recursive","true")
+    spark.conf.set("mapreduce.input.fileinputformat.input.dir.recursive","true")
+    return spark
+
+def close_spark_session(spark):
+    spark.stop()
+
+def get_new_s3_objects(aws_session, bucket_name=None, prefix=None, last_modified=datetime.utcnow()):
+    """Given a bucket/prefix with the timestamp, the function returns list of
+    objects that are created post the given timestamp. The timestamp has to be
+    in UTC"""
+    object_list = []
+    if prefix is None or prefix == '/':
+        prefix = ''
+    s3_client = aws_session.client('s3')
+    paginator = s3_client.get_paginator('list_objects_v2')
+    for p in prefix:
+        pages = paginator.paginate(Bucket=bucket_name, Prefix=p)
+        for page in pages:
+            if page['KeyCount'] == 0:
+                break
+            for s3_object in page['Contents']:
+                if s3_object['Key'].endswith('/') or s3_object['Size'] == 0:
+                    continue
+                if s3_object['LastModified'] >= last_modified:
+                    object_dict = dict()
+                    object_dict['bucket'] = bucket_name
+                    object_dict['object_name'] = s3_object['Key']
+                    object_dict['last_modified'] = s3_object['LastModified']
+                    object_list.append(object_dict)
+    return object_list
+
+def add_partition(stg_table,region,year,month,day,hour,output_path,bulk_load):
+    if bulk_load == 'Y':
+        add_partition_sql="hive -e \"use ent_amazon_connect_psa;alter table {0} add if not exists partition (region='{1}',year='{2}',month='{3}',day='{4}',hour='{5}') location '{6}'\"".format(stg_table,region,year,month,day,hour,output_path)
+    else:
+        add_partition_sql="hive -e \"use ent_amazon_connect_psa;alter table {0} drop partition (region='{1}');alter table {0} add if not exists partition (region='{1}',year='{2}',month='{3}',day='{4}',hour='{5}') location '{6}'\"".format(stg_table,region,year,month,day,hour,output_path)
+    log_helper.info("######################## Adding partition running sql {}".format(add_partition_sql))
+    status, stdout, stderr=common_helper.run_cmd(add_partition_sql)
+    log_helper.info("######################## STATUS of hive add partition query {}".format(status))
+    log_helper.info ("stdout for add_partition_sql {}".format(stdout))
+    log_helper.info ("stderr for add_partition_sql {}".format(stderr))
+
+    add_partition_sql="hive -e \"use ent_amazon_connect_psa;alter table {0}_archive add if not exists partition (region='{1}',year='{2}',month='{3}',day='{4}',hour='{5}') location '{6}'\"".format(stg_table,region,year,month,day,hour,output_path)
+    log_helper.info("######################## Adding partition to {}_archive table, running sql {}".format(stg_table,add_partition_sql))
+    ret_status, stdout, stderr=common_helper.run_cmd(add_partition_sql)
+    log_helper.info("######################## Status of Hive add partition query for {}_archive status => {} ".format(stg_table,ret_status))
+    log_helper.info ("stdout for add_partition_sql {}".format(stdout))
+    log_helper.info ("stderr for add_partition_sql {}".format(stderr))
+
+    return status
+
+def main():
+    log_helper.info("Input Arguments are %s"%args)
+    spark = create_spark_session("amazon_connect_stg_ctr_{}".format(args.region))
+    aws_session = session.Session()
+    client=boto3.client('s3')
+
+    utc_zone = tz.tzutc()
+    local_zone = tz.tzlocal()
+    extr_date=args.year+'-'+args.month+'-'+args.day+' '+args.hour+':'+args.mins+':'+args.secs
+    extr_start_date=datetime.strptime(extr_date,'%Y-%m-%d %H:%M:%S')
+    log_helper.info("Last Data Extract Start Date is %s"%extr_start_date)
+    date_1day_ago= extr_start_date-timedelta(days = 1)
+    log_helper.debug("prev day date is %s"%date_1day_ago)
+    date_1day_after=extr_start_date+timedelta(days = 1)
+    log_helper.debug("next day date is %s"%date_1day_after)
+
+    last_modified=extr_start_date.replace(tzinfo=local_zone).astimezone(utc_zone).replace(tzinfo=tz.tzutc())
+    table_location_bucket_name=args.src_bucket
+
+    extr_end_date = extr_start_date
+    #for bulk load , if end_date is not provided , it tries to pull the files till date
+    if args.bulk_load == 'Y':
+        if args.end_date is None or args.end_date == 'None':
+            dt_string = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            extr_end_date=datetime.strptime(dt_string,'%Y-%m-%d %H:%M:%S')
+        else:
+            extr_end_date=datetime.strptime(args.end_date,'%Y-%m-%d')
+
+    s_date = extr_start_date.date()
+    l_date = extr_end_date.date()
+    log_helper.info("S3 listing Start date is %s"%s_date)
+    log_helper.info("S3 listing End date is %s"%l_date)
+    delta = l_date - s_date
+    log_helper.debug("Delta %s"%delta)
+
+    if delta.days < 0:
+        log_helper.info( "Extract end date is earlier than extract start date. Please check the input dates Start Date : {}, End date : {}".format(extr_start_date,extr_end_date))
+        sys.exit(-1)
+    elif delta.days == 0:
+        tot_days =  1
+    else:
+        tot_days = delta.days + 1
+
+    table_location_prefix_name=[]
+    if args.bulk_load == 'Y':
+        for i in range(tot_days):
+            d = extr_start_date + timedelta(days=i)
+            s3_path_prefix = args.src_dir+str(d.year)+'/'+str('%02d'%d.month)+'/'+str('%02d'%d.day)
+            table_location_prefix_name.append(s3_path_prefix)
+    else:
+        table_location_prefix_name=[args.src_dir+str(date_1day_ago.year)+'/'+str('%02d'%date_1day_ago.month)+'/'+str('%02d'%date_1day_ago.day),args.src_dir+str(extr_start_date.year)+'/'+str('%02d'%extr_start_date.month)+'/'+str('%02d'%extr_start_date.day),args.src_dir+str(date_1day_after.year)+'/'+str('%02d'%date_1day_after.month)+'/'+str('%02d'%date_1day_after.day)]
+
+    log_helper.info("No.of S3 file prefixes to be scanned : {}" .format(len(table_location_prefix_name)))
+    log_helper.info("S3 Source Bucket to be scanned : {}" .format(table_location_bucket_name))
+    log_helper.info("S3 file Prefixes to be scanned : {}" .format(table_location_prefix_name))
+    if len(table_location_prefix_name) <= 0:
+        log_helper.info("Couldn't prepare S3 prefixes to scan. Exiting with error" )
+        sys.exit(-1)
+
+    object_list = get_new_s3_objects(aws_session=aws_session,
+	                                 bucket_name=table_location_bucket_name,
+	                                 prefix=table_location_prefix_name,
+	                                 last_modified=last_modified)
+
+    paths=[]
+    dates_list=[]
+    for i in object_list:
+        paths.append('s3://{}/{}'.format(i['bucket'],i['object_name']))
+        dates_list.append(i['last_modified'])
+
+    log_helper.info("Source S3 path has no.of files =>{}".format(len(paths)))
+    log_helper.info("Files to be loaded from Source S3 path =>{}".format(object_list))
+    if len(paths) <= 0:
+        log_helper.info( "Source S3 path does not exists, returning without doing anything")
+        sys.exit(99)
+
+    data_extract_end_date = max(dates_list)
+    file_path="/home/hadoop/amazon_connect/temp/stg_ctr_data_extract_end_date_{}.txt".format(args.region)
+    log_helper.debug("file_path for data_extr_end_date is %s"%file_path)
+    fh=open(file_path,"w")
+    fh.write(str(data_extract_end_date))
+    fh.close()
+
+    output_path='s3://{}/{}/{}/{}/{}/{}/{}/'.format(args.dest_bucket,args.dest_dir,args.region,data_extract_end_date.year,str('%02d'%data_extract_end_date.month),str('%02d'%data_extract_end_date.day),str('%02d'%data_extract_end_date.hour))
+    log_helper.info("Destination S3 output path : %s"%output_path)
+
+    #load into spark
+    ctr_df = spark.read.json(paths).distinct()
+    windowSpec = Window.partitionBy(ctr_df['contactid']).orderBy(ctr_df['lastupdatetimestamp'].desc())
+    rowDF = ctr_df.withColumn("rownum", F.row_number().over(windowSpec))
+    dedup_stg_ctr_df = rowDF.filter("rownum==1").drop("rownum")
+    dedup_stg_ctr_df.write.format("json").mode("overwrite").save(output_path)
+    close_spark_session(spark)
+
+    '''adding hive partition'''
+    exit_code=add_partition(args.stg_table,args.region,data_extract_end_date.year,data_extract_end_date.month,data_extract_end_date.day,data_extract_end_date.hour,output_path,args.bulk_load)
+    log_helper.info("EXIT code of hive add partition %s"%exit_code)
+    if exit_code==0:
+        log_helper.info("Hive partition added successfully for dest path %s"%output_path)
+        log_helper.info("DATA_EXTRACT_END_DATE for next run is %s"%data_extract_end_date)
+    else:
+        log_helper.info("Hive add partition failed for dest path %s"%output_path)
+        sys.exit(exit_code)
+
+if __name__ == '__main__':
+    args=get_args()
+    app_name="amazon_connect"
+    process_name="load_stg_ctr_{}".format(args.region)
+    if args.log_file_name is None:
+        log_helper = getGroupLogger(app_name,process_name,None)
+    else:
+        log_helper = getGroupLogger(app_name,process_name,args.log_file_name)
+    main()    
+                
+                
