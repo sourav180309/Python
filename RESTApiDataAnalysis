@@ -1,0 +1,2323 @@
+1.
+#!/u01/python/bin/python2.7
+#set -vx
+############################################################################################################
+# File:     get_files_from_wave_to_csv.py
+# Purpose:  Python script to Offload the Wave dataset into CSV File 
+# Author:   Sourav Chandra
+# Date:     Mar 14 2019
+# Intial Version : 1.0
+# Parameter Passing : ./get_files_from_wave_to_csv.py 
+############################################################################################################
+
+import base64, sys, requests, time, json, io, chardet,json,argparse,getpass,logging,cx_Oracle
+import os
+from datetime import datetime
+from collections import OrderedDict
+#import time
+import unicodecsv as csv
+
+##reload(sys)
+##sys.setdefaultencoding('utf-8')
+
+env_type=os.getenv('env_typ')
+url_prefix=os.getenv('url_prefix')
+offload_log_file=os.getenv('dataset_offload_log_file')
+SAQL_SQL=os.getenv('SAQL_SQL')
+TargetFile=os.getenv('Output_File_name')
+
+logging.basicConfig(filename=offload_log_file, filemode='w', format='%(asctime)s - %(message)s', level=logging.DEBUG)
+
+username=os.getenv('user_name')
+password=os.getenv('user_passwd')
+dataset_name = os.getenv('dataset_name')
+LAST_EXTRACT_DT = os.getenv('LAST_EXTRACT_DT')
+dataset_field_names = os.getenv('output_field_names')
+
+output_field_names = list(dataset_field_names.split(","))
+
+logging.info( output_field_names)
+
+logging.info("Starting the Offload process for " + dataset_name + " Dataset in " + env_type + " Environment")
+
+logging.info("User " + str(username) + " to Offload " + str(dataset_name) + " Dataset in " + str(env_type) + " Environment")
+
+consumer_key = os.getenv('consumer_key')
+consumer_secret = os.getenv('consumer_secret')
+
+login_request = {
+   "grant_type": "password",
+    "client_id": consumer_key,
+    "client_secret": consumer_secret,
+    "username": username,
+    "password": password
+}
+
+## Establish connection to the WAVE environemnt
+try:
+    session = requests.post("https://"+ url_prefix +".salesforce.com/services/oauth2/token".format(env_type), headers={"Content-Type": "application/x-www-form-urlencoded"}, data=login_request)
+    if session.status_code == 200:
+       logging.info("Connection Established successfully with WAVE "+ env_type +" environemnt.")
+    else:
+       logging.exception("Connection Failed - Could not establish connection with WAVE "+ env_type +" environemnt. Please check the logs for more details")
+       sys.exit(1)
+    session_info = session.json()
+##print(session_info)
+    logging.info("session_info")
+    logging.info("Instance url is " + session_info['instance_url'])
+    logging.info("ID url is " + session_info['id'])
+    base_url = session_info['instance_url']
+    token = session_info['access_token']
+##print("Getting base url " + base_url)
+    logging.info("Getting base url " + base_url)
+    headers = {
+        'Content-Type': "application/json",
+        'Authorization': "Bearer {}".format(token),
+        'Cache-Control': "no-cache"#,
+    }
+except requests.RequestException as e:
+    logging.exception("Connection Failed - Could not establish connection with WAVE "+ env_type +" environemnt. Please check the logs for more details "+ str(e))
+    sys.exit(1)
+
+## Fetching the dataset details
+try:
+    response = requests.request("GET", "{}/services/data/v44.0/wave/datasets/{}".format(base_url,dataset_name), headers=headers)
+    response_obj = json.loads(response.text)
+    jsonds_folder=response_obj["folder"]
+    dataset_folder=jsonds_folder["url"]
+    DS_Last_Refresh_DT=response_obj["dataRefreshDate"]
+    abd="\""+DS_Last_Refresh_DT+"\""
+    DS_Last_Refresh_DT_JS=time.strptime(DS_Last_Refresh_DT, "%Y-%m-%dT%H:%M:%S.%fZ")
+    LAST_EXTRACT_DT_JS=time.strptime(LAST_EXTRACT_DT, "%d-%b-%y")
+    logging.info("Getting dataset request url of " + str(response.text))	
+    logging.info("Dataset created date on  " + response_obj["createdDate"])
+    logging.info("Current Version URL of the Dataset " + dataset_name + response_obj["currentVersionUrl"])
+    logging.info("Dataset Type " + dataset_name + response_obj["datasetType"])
+    logging.info("Dataset Label of " + dataset_name +" is " + response_obj["label"])
+    logging.info("Dataset Folder URL  " + jsonds_folder["url"])
+    logging.info("Dataset Folder ID  " + jsonds_folder["id"])
+    logging.info("Dataset Folder NAME  " + jsonds_folder["name"])
+    logging.info("Dataset folder Label  " + jsonds_folder["label"])
+    logging.info("Dataset last refreshed on  " + response_obj["dataRefreshDate"])
+    logging.info("Dataset last Offloaded on  " + LAST_EXTRACT_DT)
+    logging.info("Dataset last refreshed on json format  " + str(DS_Last_Refresh_DT_JS))
+    logging.info("Dataset last Offloaded on json format " + str(LAST_EXTRACT_DT_JS))
+    if DS_Last_Refresh_DT_JS > LAST_EXTRACT_DT_JS:
+       logging.info("There were changes to the dataset " + dataset_name + " after it was offloaded last time on " + LAST_EXTRACT_DT)  
+       logging.info("Proceeding with the Offloading of the dataset " + dataset_name )
+    else:
+       logging.info("No changes to the dataset " + dataset_name + " after " + DS_Last_Refresh_DT)  
+       sys.exit(2)  
+#getting the container id and version id needed to make the SAQL query
+    current_version_url = response_obj["currentVersionUrl"]
+    parts_str = current_version_url.replace("/services/data/v44.0/wave/datasets/", "")
+    contain_id_version_id = parts_str.replace("/versions/", "/")
+    logging.info("Getting contain_id and version_id " + contain_id_version_id + " of the  " + dataset_name + " Dataset ")
+except requests.RequestException as e:
+    status = "Connectivity error"
+    logging.exception("Retrival Error - Could not fetech the record count of the dataset "+ dataset_name +". Please check the logs for more details " + str(e))
+    sys.exit(1)
+
+## Framing the SAQL query to get the record count of dataset
+saql_query1 = {
+          "query": "q = load \""+contain_id_version_id+"\";q = group q by all;q = foreach q generate count() as 'count' ;q = limit q 1;".format(contain_id_version_id)
+}
+
+logging.exception("Framing the SAQL Qery to fetch the total number of records in the " + dataset_name + " Dataset ")
+
+## Execute the SAQL query to get the record count from the dataset
+try:
+    response = requests.request("POST", "{}/services/data/v44.0/wave/query".format(base_url), json=saql_query1, headers=headers)
+    if response.status_code == 200:
+       logging.info("Connection Established successfully with " + base_url)  
+       logging.info("SAQL Qery to fetch the total number of records in the " + dataset_name + " Dataset is " + saql_query1['query'])
+    else:
+       logging.info("Retrival Error - Could not fetech the record count of the dataset "+ dataset_name +". Please check the logs for more details")
+       sys.exit(1)   
+
+    json_obj1 = json.loads(response.text)
+    record_cnt = json_obj1['results']['records']
+    record_cnt1=record_cnt[0]
+    a=record_cnt1['count']
+    os.putenv("dataset_cnt",str(a))
+    print(a)
+    logging.info("Total number of records in the " + dataset_name + " Dataset is " + str(a))
+except requests.RequestException as e:
+    logging.exception("Retrival Error - Could not fetech the record count of the dataset "+ dataset_name +". Please check the logs for more details " + str(e) )
+    sys.exit(1)
+except ValueError:
+    logging.exception("Retrival Error - Could not fetech the record count of the dataset "+ dataset_name +" because of JSON Parsing Error" )
+    sys.exit(1)    
+except (IndexError, KeyError):
+    logging.exception("Retrival Error - Could not fetech the record count of the dataset "+ dataset_name +" because of JSON Format Error" )
+    sys.exit(1)
+
+
+## Framing the SAQL query to get the records from the dataset
+
+saql_query2 = {
+		"query":"q = load \""+contain_id_version_id+"\";" + SAQL_SQL + " " + str(a) + ";".format(contain_id_version_id)
+}
+
+y = json.dumps(saql_query2)
+
+logging.info("Framing the SAQL Qery to fetch the actual records in the " + dataset_name + " Dataset ")
+logging.info("SAQL Qery to Offload the records from the " + dataset_name + " Dataset is " + saql_query2['query'])
+logging.info(saql_query2)
+
+## Execute the SAQL query to get the records from the dataset
+try:
+    response = requests.request("POST", "{}/services/data/v44.0/wave/query".format(base_url), json=saql_query2, headers=headers)
+    if response.status_code == 200:
+       logging.info("Connection Established successfully with " + base_url + " to Offload the dataset records")
+    else:
+       logging.info("Connectivity Error - Could not establish connectivity with " + base_url + " to Offload the dataset records" )
+       sys.exit(1)
+
+    json_obj = json.loads(response.text, object_pairs_hook=OrderedDict)
+    record_dicts = json_obj['results']['records']
+    logging.info("Writing the fetched records from " + dataset_name + " Dataset to the file" + TargetFile)
+
+## Write the fetched records to the CSV file    
+    with open(TargetFile, "w") as csv_output:
+        writer = csv.DictWriter(
+            csv_output,
+            fieldnames=output_field_names,
+            ##fieldnames=record_dicts[0].keys(),
+            encoding='utf-8',
+            lineterminator='\n',
+            delimiter=',',
+            quoting=csv.QUOTE_ALL,
+            quotechar='"')
+    
+        writer.writeheader()
+        writer.writerows(record_dicts)
+
+    logging.info("Completed the Offloading of " + dataset_name + " Dataset into the file" + TargetFile)
+except requests.RequestException as e:
+    status = "Connectivity error"
+    logging.exception("Retrival Error - Could not fetech the record from the dataset "+ dataset_name +". Please check the logs for more details " + str(e))
+    sys.exit(1)
+except ValueError:
+    logging.exception("Retrival Error - Could not fetech the record from the dataset "+ dataset_name +" because of JSON Parsing Error" )
+    sys.exit(1)    
+except (IndexError, KeyError):
+    logging.exception("Retrival Error - Could not fetech the record from the dataset "+ dataset_name +" because of JSON Format Error" )
+    sys.exit(1)
+
+2. 
+#!/bin/sh
+#!/u01/python/bin/python2.7
+# File: wrapper_offload_wave_to_csv.sh
+# Author: Kishore Kumar
+# Date: 03/18/2019
+#########################################################################################
+# Set the environment variable.
+. $HOME/ops_cron_env.sh 2>/dev/null 1>/dev/null
+
+# Load ksh functions - all shell scripts should explicitly source this file
+. ${kshfn} 2>/dev/null 1>/dev/null
+
+date_val=`date +'%Y%m%d%H%M'`
+export dataset_name=$1
+#export etl_env=$2
+export env_typ=$2
+O_File_name=$3
+datestring=`date "+%Y%m%d"`
+export Output_File_name=`echo $O_File_name | sed "s/yyyymmdd/$datestring/"`
+export pid_value=$$
+
+# Create better logging name for every run of the wrapper script, include module name for it.
+
+wrapper_log_file=$HOME/edw/src/log/es_wrapper_${dataset_name}_${pid_value}_${date_val}.log
+wrapper_error_file=$HOME/edw/src/log/es_wrapper_${dataset_name}_${pid_value}_${date_val}.err
+
+export dataset_offload_log_file=$HOME/edw/src/log/dataset_offload_${dataset_name}_${pid_value}_${date_val}.log
+
+echo "`date '+%F %T,%3N'` - Setting the environment variables" > ${wrapper_log_file}
+
+echo "`date '+%F %T,%3N'` - Setting the appropriate user credentials for the environments passed" >> ${wrapper_log_file}
+
+# Configure the usage of the parameters or connection information here
+# Adding the encoding to the password for privacy protection.
+
+if [[ $2 == "PROD" ]]
+then
+export user_name=${insights_user_name}
+echo "user name ${insights_user_name}" >> ${wrapper_log_file}
+
+encrypt_user_passwd=${insights_encrypt_user_passwd}
+export user_passwd=`echo "${encrypt_user_passwd}" | base64 -di`
+
+connection_string=${insights_connection_string}
+echo "connection_string:${insights_connection_string}" >> ${wrapper_log_file}
+
+export consumer_key=${consumer_key} 
+export consumer_secret=${consumer_secret} 
+export url_prefix="login"
+
+elif [[ $2 == "PREPRODUAT" ]]
+then
+export user_name=${wave_PREPRODUAT_user_name}
+echo "user name ${wave_PREPRODUAT_user_name}" >> ${wrapper_log_file}
+
+encrypt_user_passwd=${wave_PREPRODUAT_encrypt_user_passwd}
+export user_passwd=`echo "${encrypt_user_passwd}" | base64 -di`
+
+connection_string=${wave_PREPRODUAT_connection_string}
+echo "connection_string:${wave_PREPRODUAT_connection_string}" >> ${wrapper_log_file}
+
+export consumer_key=${consumer_key_PREPRODUAT}
+export consumer_secret=${consumer_secret_PREPRODUAT}
+
+export url_prefix="test"
+
+else
+echo "`date '+%F %T,%3N'` - Please pass the correct SFDC target instance: PROD or EOS or SUPF OR PREPRODUAT" >> ${wrapper_error_file}
+exit 1
+fi
+
+echo "`date '+%F %T,%3N'` - Successfully initialized the environment variables"  >> ${wrapper_error_file}
+
+# get the userid, pwd and database name thru standard function
+get_db_connect_parms "edw_ops"
+
+export SAQL_SQL=$($ORACLE_HOME/bin/sqlplus -s <<EOF
+/@${db_id}
+set pages 0 feed off
+set linesize 28000
+SET LONGCHUNKSIZE 30000
+set long 28000
+SELECT SOQL  FROM EDW_OPS.CMF_SOQL_CONFIG_GCA
+WHERE MODULE_NAM='${dataset_name}';
+EOF
+)
+
+##echo "SOQL is $SAQL_SQL"
+
+export LAST_EXTRACT_DT=$($ORACLE_HOME/bin/sqlplus -s <<EOF
+/@${db_id}
+set pages 0 feed off
+set linesize 5000
+select ETL_JOB_EXTR_BUS_DT from EDW_OPS.OPS_AUDIT_ETL_JOBS where OPS_AUDIT_ETL_JOBS_KEY=(
+SELECT max(OPS_AUDIT_ETL_JOBS_KEY)  FROM EDW_OPS.OPS_AUDIT_ETL_JOBS WHERE ETL_JOB_NAM='${dataset_name}' and ETL_JOB_STS_CD='COMPLETED');
+EOF
+)
+
+export output_field_names=$($ORACLE_HOME/bin/sqlplus -s <<EOF
+/@${db_id}
+set pages 0 feed off
+set linesize 8000
+SET LONGCHUNKSIZE 30000
+set long 8000
+SELECT DATASETFIELDNAMES  FROM EDW_OPS.CMF_SOQL_CONFIG_GCA
+WHERE MODULE_NAM='${dataset_name}';
+EOF
+)
+
+echo "output_field_names= $output_field_names"  >> ${wrapper_error_file}
+
+# Code for inserting the record within the ops audit etl jobs.
+# Make sure you have all the parameters you need to construct the insert query.
+# Set the record entry to running. Note the timestamp on initiation.
+
+FOLDER_NAME='Analytics_Cloud_Offload_Job'
+JOB_NAME=${dataset_name}
+db_id='edw_ops'
+
+$ORACLE_HOME/bin/sqlplus -s <<EOF >>${wrapper_log_file}
+/@${db_id} 
+set pagesize 0 feedback off verify off heading off echo off
+set serveroutput on size 1000000
+whenever sqlerror EXIT 1
+
+declare
+
+ v_run_cnt     number;
+ v_rec_cnt     number;
+ v_max_ops_audit_etl_jobs_key number;
+ running_status  EXCEPTION;
+ job_not_defined EXCEPTION;
+ completed_status_not_defined EXCEPTION;
+
+
+begin
+ -- check if we currently have the same job already running
+
+ select count(*),
+        count(decode(etl_job_sts_cd,'RUNNING',etl_job_sts_cd)),
+        nvl(max( decode(etl_job_sts_cd,'COMPLETED',ops_audit_etl_jobs_key) ),0)
+ into v_rec_cnt,v_run_cnt,v_max_ops_audit_etl_jobs_key from ops_audit_etl_jobs
+where   ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+ and     ETL_JOB_NAM = '$JOB_NAME';
+
+
+ if v_run_cnt >=  1 then
+   raise running_status;
+ end if;
+ if v_rec_cnt = 0   then
+   raise job_not_defined;
+ end if;
+ if v_max_ops_audit_etl_jobs_key= 0 then
+   raise completed_status_not_defined;
+ end if;
+
+
+
+INSERT into ops_audit_etl_jobs
+( OPS_AUDIT_ETL_JOBS_KEY,
+  ETL_JOB_FOLDR_NAM,
+  ETL_JOB_NAM,
+    ETL_JOB_GROUP_NAM,
+  ETL_JOB_START_TS,
+  ETL_JOB_STS_CD,
+  ETL_JOB_EXTR_START_TS,
+  ETL_JOB_EXTR_END_TS,
+  ETL_JOB_EXTR_BUS_DT,
+   EXTR_TABLE_NAM,
+   EXTR_DT_COL_NAM,
+   TRGT_TABLE_NAM,
+  MAX_OPS_AUDIT_ETL_JOBS_KEY,
+  CONN_NAM
+)
+SELECT
+  OPS_AUDIT_ETL_JOBS_KEY_SEQ.NEXTVAL,
+  ETL_JOB_FOLDR_NAM,
+  ETL_JOB_NAM,
+  ETL_JOB_GROUP_NAM,
+  SYSDATE AS "ETL_JOB_START_TS",
+  'RUNNING' AS "ETL_JOB_STS_CD",
+  SYSDATE AS "ETL_JOB_EXTR_START_TS",
+  SYSDATE AS "ETL_JOB_EXTR_END_TS",
+  TRUNC(SYSDATE) AS "ETL_JOB_EXTR_BUS_DT",
+   EXTR_TABLE_NAM,
+   EXTR_DT_COL_NAM,
+   TRGT_TABLE_NAM,
+  v_max_ops_audit_etl_jobs_key,
+  CONN_NAM
+FROM   ops_audit_etl_jobs
+WHERE  ops_audit_etl_jobs_key =  v_max_ops_audit_etl_jobs_key;
+
+COMMIT;
+
+exception
+   when running_status then
+      raise_application_error(-20101, 'This job currently has a running status in the ops_audit_etl_jobs table....');
+   when job_not_defined then
+      raise_application_error(-20111, 'This job is currently not defined in the ops_audit_etl_jobs table.... ');
+   when completed_status_not_defined then
+      raise_application_error(-20112, 'The record in ops_audit_etl_jobs table does not have  a single record with COMPLETED status, need to have atleast initial record for this job with a COMPLETED status.... ');
+   when OTHERS then
+      raise_application_error(-20000, SQLERRM);
+
+end;
+/
+EOF
+
+CRT_ETL_JOB_RETURN_CODE=$?
+
+echo -e "`date '+%F %T,%3N'` - CRT_ETL_JOB_RETURN_CODE="$CRT_ETL_JOB_RETURN_CODE >> ${wrapper_log_file}
+
+if [ $CRT_ETL_JOB_RETURN_CODE -eq 0 ]
+then
+    echo -e "`date '+%F %T,%3N'` - The insert record is now created within the ops_audit_etl_job table" >> ${wrapper_log_file}
+    echo -e "********************************************************************" >> ${wrapper_log_file}
+else
+    echo -e '`date '+%F %T,%3N'` - FAILED: Failed on trying to insert a new record into the Ops_Audit table...please check the logs'
+    echo -e '`date '+%F %T,%3N'` - FAILED: Failed on trying to insert a new record into the Ops_Audit table' >> ${wrapper_log_file}
+    echo -e "********************************************************************" >> ${wrapper_log_file}
+	cat ${wrapper_log_file}
+    exit $CRT_ETL_JOB_RETURN_CODE
+fi
+
+##echo -e  `java -version`
+
+# End of the script for the new logging insert statement.
+
+############################################################################################################
+
+echo -e "`date '+%F %T,%3N'` - Dataset Offload Log files is $dataset_offload_log_file" >> ${wrapper_log_file}
+echo -e "********************************************************************" >> ${wrapper_log_file}
+echo -e "`date '+%F %T,%3N'` - Dataset Offloading starts" >> ${wrapper_log_file}
+
+total_rows=$(/u01/python/bin/python2.7 /etl/sfdc_ops/edw/src/bin/get_files_from_wave_to_csv.py)
+UPLOADER_RETURN_CODE=$?
+OutputFile_count=`wc -l $Output_File_name | cut -f1 -d" "`
+##success_count=`expr "${OutputFile_count}" - "1" `
+success_count=${total_rows}
+OutputFileName_wo_ext=`echo "${Output_File_name}" | cut -f1 -d'.'`
+IndicatorFileName=${OutputFileName_wo_ext}'.done'
+error_count=0
+
+cat $dataset_offload_log_file >> ${wrapper_log_file}
+
+############################################################################################################
+
+# Immediately capture the uploader script into a return code variable to be used later.
+
+echo -e "`date '+%F %T,%3N'` - UPLOADER_RETURN_CODE="$UPLOADER_RETURN_CODE >>${wrapper_log_file}
+
+# Keep all those parameters ready as those will be used while updating the record within the 
+# ops audit update script that is going to follow.
+
+
+# Code for updating the record inserted into the ops audit etl job with all the stats variable values.
+
+if [[ $UPLOADER_RETURN_CODE -eq 0 && $error_count -eq 0 && $total_rows -eq $success_count ]]
+then
+   AUDIT_STS_CD='COMPLETED'
+   REJECTION_RETURN_CODE=0
+
+echo -e "`date '+%F %T,%3N'` - Total records in Dataset is : $total_rows" >> ${wrapper_log_file}
+echo -e "`date '+%F %T,%3N'` - Total records Offloaded from WAVE dataset dataset is : $success_count" >> ${wrapper_log_file}
+echo -e "`date '+%F %T,%3N'` - Total $total_rows Offloaded from WAVE dataset " >> ${wrapper_log_file}
+
+##touch ${IndicatorFileName}
+
+##echo -e "`date '+%F %T,%3N'` - Indicator File ${IndicatorFileName} Created " >> ${wrapper_log_file}
+
+echo -e "`date '+%F %T,%3N'` - Dataset Offloading Completed" >> ${wrapper_log_file}
+
+echo -e "********************************************************************" >> ${wrapper_log_file}
+
+elif [[ $UPLOADER_RETURN_CODE -eq 2 ]]
+then
+
+   AUDIT_STS_CD='COMPLETED'
+   REJECTION_RETURN_CODE=0
+  total_rows=0
+  success_count=0
+  error_count=0
+  
+$ORACLE_HOME/bin/sqlplus -s <<EOF >>${wrapper_log_file}
+/@${db_id} 
+set pagesize 0 feedback off verify off heading off echo off
+set serveroutput on size 1000000
+whenever sqlerror EXIT 1
+UPDATE OPS_AUDIT_ETL_JOBS
+SET   ETL_JOB_STS_CD = '$AUDIT_STS_CD',
+      SRC_CNT = case when $total_rows=-1 then NULL else $total_rows end,
+      INS_CNT = case when $success_count=-1 then NULL else $success_count end,
+      ERR_CNT = case when $error_count=-1 then NULL else $error_count end,
+      REJ_CNT = case when $error_count=-1 then NULL else $error_count end,
+      ETL_JOB_STS_DSC='No Records Processed',
+      ETL_JOB_END_TS = SYSDATE
+WHERE  OPS_AUDIT_ETL_JOBS_KEY =
+(
+     select max(OPS_AUDIT_ETL_JOBS_KEY)
+     from   OPS_AUDIT_ETL_JOBS
+     where  ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+     and     ETL_JOB_NAM = '$JOB_NAME'
+     and     ETL_JOB_STS_CD = 'RUNNING'
+);
+COMMIT;
+EOF
+
+UPD_ETL_JOB_RETURN_CODE=$?
+
+   echo -e "`date '+%F %T,%3N'` - The record is now updated within the ops_audit_etl_job table but there were no records Offloaded " >> ${wrapper_log_file}
+    echo -e "********************************************************************" >> ${wrapper_log_file}
+    echo -e "`date '+%F %T,%3N'` - Please check the log file at the location" 
+    echo  ${wrapper_log_file} >> ${wrapper_log_file}
+	cat ${wrapper_log_file}
+    exit ${UPD_ETL_JOB_RETURN_CODE}
+
+
+else
+  AUDIT_STS_CD='ERROR'
+  total_rows=$total_rows
+  success_count=-1
+  error_count=-1
+
+$ORACLE_HOME/bin/sqlplus -s <<EOF >>${wrapper_log_file}
+/@${db_id}
+set pagesize 0 feedback off verify off heading off echo off
+set serveroutput on size 1000000
+whenever sqlerror EXIT 1
+UPDATE OPS_AUDIT_ETL_JOBS
+SET   ETL_JOB_STS_CD = '$AUDIT_STS_CD',
+      SRC_CNT = case when $total_rows=-1 then NULL else $total_rows end,
+      INS_CNT = case when $success_count=-1 then NULL else $success_count end,
+      ERR_CNT = case when $error_count=-1 then NULL else $error_count end,
+      REJ_CNT = case when $error_count=-1 then NULL else $error_count end,
+      ETL_JOB_STS_DSC='No Records Processed',
+      ETL_JOB_END_TS = SYSDATE
+WHERE  OPS_AUDIT_ETL_JOBS_KEY =
+(
+     select max(OPS_AUDIT_ETL_JOBS_KEY)
+     from   OPS_AUDIT_ETL_JOBS
+     where  ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+     and     ETL_JOB_NAM = '$JOB_NAME'
+     and     ETL_JOB_STS_CD = 'RUNNING'
+);
+COMMIT;
+EOF
+
+
+  echo -e '`date '+%F %T,%3N'` - FAILED: Failed to Offload the dataset into CSV..please check the logs' >> ${wrapper_log_file}
+  echo -e "`date '+%F %T,%3N'` - Total records in Dataset is : $total_rows" >> ${wrapper_log_file}
+  echo -e "`date '+%F %T,%3N'` - Total records Offloaded from WAVE dataset is : $success_count" >> ${wrapper_log_file}
+
+  echo -e "********************************************************************" >> ${wrapper_log_file}
+
+  REJECTION_RETURN_CODE=1
+fi
+
+# ******************************************************************************
+
+echo -e "`date '+%F %T,%3N'` - STEP -> UPD_OPS_AUDIT_ETL_JOBS" >> ${wrapper_log_file}
+echo -e "******************************************************************************" >> ${wrapper_log_file}
+
+$ORACLE_HOME/bin/sqlplus -s <<EOF >>${wrapper_log_file}
+/@${db_id} 
+set pagesize 0 feedback off verify off heading off echo off
+set serveroutput on size 1000000
+whenever sqlerror EXIT 1
+UPDATE OPS_AUDIT_ETL_JOBS
+SET   ETL_JOB_END_TS =  SYSDATE,
+      ETL_JOB_STS_CD = '$AUDIT_STS_CD',
+      SRC_CNT = case when $total_rows=-1 then NULL else $total_rows end,
+      INS_CNT = case when $success_count=-1 then NULL else $success_count end,
+      ERR_CNT = case when $error_count=-1 then NULL else $error_count end,
+      REJ_CNT = case when $error_count=-1 then NULL else $error_count end
+WHERE  OPS_AUDIT_ETL_JOBS_KEY =
+(
+     select max(OPS_AUDIT_ETL_JOBS_KEY)
+     from   OPS_AUDIT_ETL_JOBS
+     where  ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+     and     ETL_JOB_NAM = '$JOB_NAME'
+     and     ETL_JOB_STS_CD = 'RUNNING'
+);
+COMMIT;
+EOF
+
+UPD_ETL_JOB_RETURN_CODE=$?
+
+echo -e "`date '+%F %T,%3N'` - UPLOADER_RETURN_CODE="$UPLOADER_RETURN_CODE >>${wrapper_log_file}
+
+echo -e "`date '+%F %T,%3N'` - Checking the exit status now" >> ${wrapper_log_file}
+
+if [[ $UPD_ETL_JOB_RETURN_CODE -eq 0 && $REJECTION_RETURN_CODE -eq 0 ]]
+then
+    echo -e "`date '+%F %T,%3N'` - The record is now updated within the ops_audit_etl_job table and dataset offloaded without any errors " >> ${wrapper_log_file}
+    echo -e "********************************************************************" >> ${wrapper_log_file}
+    echo  ${wrapper_log_file} >> ${wrapper_log_file}
+elif [[ $UPD_ETL_JOB_RETURN_CODE -eq 0 &&  $REJECTION_RETURN_CODE -eq 1 ]]
+then
+   echo -e "`date '+%F %T,%3N'` - The record is now updated within the ops_audit_etl_job table but Their were errors during offload" >> ${wrapper_log_file}
+    echo -e "********************************************************************" >> ${wrapper_log_file}
+    echo -e "`date '+%F %T,%3N'` - Please check the log file at the location" 
+    echo  ${wrapper_log_file} >> ${wrapper_log_file}
+	cat ${wrapper_log_file}
+    exit $REJECTION_RETURN_CODE
+else
+    echo -e "`date '+%F %T,%3N'` - FAILED: Failed on trying to update the existing record into the Ops_Audit table" >> ${wrapper_log_file}
+    echo -e "********************************************************************" >> ${wrapper_log_file}
+    echo -e "Please check the log file at the location" 
+    echo  ${wrapper_log_file} >> ${wrapper_log_file}
+	cat ${wrapper_log_file}
+    exit $UPD_ETL_JOB_RETURN_CODE
+fi
+
+cat ${wrapper_log_file}
+
+3. 
+#!/bin/ksh
+#
+# File:     gca_dw_load.sh
+#
+# Purpose:  The script is used to load/run the Infa ODS Jobs and also archieve the files
+#
+# Author:   Sourav Chandra
+# Date:     06/11/2019
+#
+
+#set -vx
+
+#===============================================================
+# Variables
+#===============================================================
+# if manually run we need to source this
+. $HOME/ops_cron_env.sh
+
+# Load ksh functions - all shell scripts should explicitly source this file
+. ${kshfn}
+
+
+#===============================================================
+# Parameters usage
+#===============================================================
+FOLDER_NAME=${1:?[Error: Required Job Folder Name]}
+JOB_NAME=${2:?[Error: Required Job Name]}
+FILE_SUFFIX=${3:?[Error: Required File Suffix Name]}
+PAR_FILE_IND=${4:?[Error: Required Parfile creation Indicator]}
+get_db_connect_parms "edw_ops"
+
+DT=$($ORACLE_HOME/bin/sqlplus -s<<EOF
+/@${db_id}
+set pages 0 feed off
+select to_char(ETL_JOB_EXTR_END_TS,'yymmdd') from OPS_AUDIT_ETL_JOBS where
+ OPS_AUDIT_ETL_JOBS_KEY =
+   (
+   select max(OPS_AUDIT_ETL_JOBS_KEY)
+   from   OPS_AUDIT_ETL_JOBS
+   where   ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+   and     ETL_JOB_NAM = '$JOB_NAME'
+   and    ETL_JOB_STS_CD = 'COMPLETED'
+   );
+EOF)
+
+
+CONTNT_DT=$($ORACLE_HOME/bin/sqlplus -s<<EOF
+/@${db_id}
+set pages 0 feed off
+select to_char(ETL_JOB_EXTR_END_TS-1,'yymmdd') from OPS_AUDIT_ETL_JOBS where
+ OPS_AUDIT_ETL_JOBS_KEY =
+   (
+   select max(OPS_AUDIT_ETL_JOBS_KEY)
+   from   OPS_AUDIT_ETL_JOBS
+   where   ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+   and     ETL_JOB_NAM = '$JOB_NAME'
+   and    ETL_JOB_STS_CD = 'COMPLETED'
+   );
+EOF)
+
+
+PARM_FILE_RETURN_CODE=$?
+GROUP_NAME='IT_BI_CORE'
+#MODULE_NAME=core_to_ods_$FILE_SUFFIX
+#EDW_LOG_FILE=${dw_log}/${DT}_$MODULE_NAME.log
+EDW_LOG_FILE=${dw_log}/${DT}_$JOB_NAME.log
+
+START_DT=$DT
+END_DT=`date '+%Y-%m-%d' | awk -F- '{ print substr($1,3) $2 $3 }'`
+DTFMT='yymmdd'
+
+TS=$($ORACLE_HOME/bin/sqlplus -s<<EOF
+/@${db_id}
+set pages 0 feed off
+select to_char(ETL_JOB_EXTR_END_TS,'hh24:mi:ss') from OPS_AUDIT_ETL_JOBS where
+ OPS_AUDIT_ETL_JOBS_KEY =
+   (
+   select max(OPS_AUDIT_ETL_JOBS_KEY)
+   from   OPS_AUDIT_ETL_JOBS
+   where   ETL_JOB_FOLDR_NAM = '$FOLDER_NAME'
+   and     ETL_JOB_NAM = '$JOB_NAME'
+   and    ETL_JOB_STS_CD = 'COMPLETED'
+   );
+EOF)
+
+if [ ! $TS == '00:00:00' ]
+then
+  echo -e 'OPS entry for ETL_JOB_NAM ='$JOB_NAME' has ETL_JOB_EXTR_END_TS='$DT' '$TS' ,which looks wrong, check if tidal job UPD_NEXTDT was timed out' >> $EDW_LOG_FILE
+  cat $EDW_LOG_FILE
+  exit 1
+fi
+
+comp_dt=`date -d ${DT} +%Y%m%d`
+strt_dt=`date -d ${DT} +%Y%m%d`
+final_dt=`date -d "${END_DT} - 3 day" +%Y%m%d`
+comp_contnt_dt=`date -d ${CONTNT_DT} +%Y%m%d`
+echo "Comp DT :  ${comp_dt}  - Contnt Dt : ${comp_contnt_dt}" >> $EDW_LOG_FILE
+# get_db_list - builds list of pods to process
+#================================================================
+get_db_list() {
+
+ # host=`hostname -f`
+ # comp_dt=`echo ${global_date_time} | cut -c1-8`
+   comp_dt=`date -d ${CONTNT_DT} +%Y%m%d`
+   comp_contnt_dt=`date -d ${CONTNT_DT} +%Y%m%d`
+
+  #Need to reset vars in case this is called many times.
+  dw_src_db_id=""
+  dw_all_db_cs=""
+
+  if [ ${ENV_TYPE} = "INFA" ]
+  then
+    for x in `grep -v ^# ${pod_conf_file} | sed "s/\([0-9]\+\)\/\([0-9]\+\)\/\([0-9]\+\)/\3\1\2/g" | awk -F "\"*,\"*" -v dt=${comp_contnt_dt} '{ if (dt >= $7 && dt < $8) print $1; else if ( dt >= $7 && dt < dt+1 && $8 == "" ) print $1 }'`
+    do
+      dw_src_db_id="${x} ${dw_src_db_id}"
+    done
+
+    for i in `grep -v ^# ${pod_conf_file} | sed "s/\([0-9]\+\)\/\([0-9]\+\)\/\([0-9]\+\)/\3\1\2/g" | awk -F "\"*,\"*" -v dt=${comp_contnt_dt} '{ if (dt >= $7 && dt < $8) print $4; else if ( dt >= $7 && dt < dt+1 && $8 == "" ) print $4 }'`
+    do
+      dw_all_db_cs="${i} ${dw_all_db_cs}"
+    done
+
+    for x in `grep -v ^# ${pod_conf_file} | sed "s/\([0-9]\+\)\/\([0-9]\+\)\/\([0-9]\+\)/\3\1\2/g" | awk -F "\"*,\"*" -v dt=${comp_contnt_dt} '{ if (dt < $7 || (dt > $8 && $8 != "")) print $1 }'`
+    do
+      echo "Content Date (${comp_contnt_dt}) is either  older than POD Launch date or later than POD Expiry Date, for ${x}" >> $EDW_LOG_FILE
+    done
+
+  else
+    dw_src_db_id=""
+    dw_all_db_cs=""
+  fi
+
+  export dw_src_db_id dw_all_db_cs
+}
+
+get_db_list
+
+
+
+echo $DT >> $EDW_LOG_FILE
+echo ${dw_src_db_id} >> $EDW_LOG_FILE
+
+
+##added by Sourav 6/11/2019 for Govt Cloud Analytics
+
+if  [ -f ${dw_dat}/gca/${FILE_SUFFIX}.lst ]
+echo "List file ${FILE_SUFFIX}.lst already exists, removing it and creating new one"
+then rm -f ${dw_dat}/gca/${FILE_SUFFIX}.lst
+fi
+ls ${dw_dat}/gca/${FILE_SUFFIX}_*.csv > ${FILE_SUFFIX}.lst  ## file format example 1. cu_metrics_<date>.csv, 2. cu_metrics2_<date>.csv
+for file in `cat ${FILE_SUFFIX}.lst`
+do
+echo ${file}
+  echo  ${file}  >>  ${dw_dat}/gca/${FILE_SUFFIX}.lst
+done
+
+if  [ -s ${dw_dat}/gca/${FILE_SUFFIX}.lst ]
+then
+  echo -e "List File ${dw_dat}/gca/${FILE_SUFFIX}.lst is available and has content, Invoking Infa job" >> $EDW_LOG_FILE 
+else 
+  if [ ! -f ${dw_dat}/gca/${FILE_SUFFIX}.lst ]
+   then
+    touch ${dw_dat}/gca/${FILE_SUFFIX}.lst; touch ${dw_dat}/gca/${FILE_SUFFIX}_DUMMY.csv
+    echo "${dw_dat}/gca/${FILE_SUFFIX}_DUMMY.csv" >> ${dw_dat}/gca/${FILE_SUFFIX}.lst
+    echo -e "List File ${dw_dat}/gca/${FILE_SUFFIX}.lst is created and has no content, Invoking Infa job." >> $EDW_LOG_FILE
+  fi	
+  
+fi
+
+
+echo -e "******************************************************************************" >> $EDW_LOG_FILE
+echo -e  'STEP -> RUN session ' >> $EDW_LOG_FILE
+ksh $EDW_SCRIPTS/run_infa_etl_job.sh $FOLDER_NAME $JOB_NAME $PAR_FILE_IND >> $EDW_LOG_FILE
+
+PMCMD_RET_CODE=$?
+
+if [ $PMCMD_RET_CODE -gt 0 ]
+then
+   echo -e 'An Error has occured while running the run_infa_etl_job.sh for '$JOB_NAME
+   cat $EDW_LOG_FILE
+   exit $PMCMD_RET_CODE
+fi
+
+#file_list=$( grep -v '^ *$' ${dw_dat}/core/${FILE_SUFFIX}.txt)
+echo -e "STEP -> MOVE FILE ARCHIVE" >> $EDW_LOG_FILE
+#echo -e "******************************************************************************" >> $EDW_LOG_FILE
+#Loop through all the files in the file list
+
+#for file in $file_list
+#do
+  #FILE_NAME=`echo $file | sed -r 's/(.*):.*/\1/'`
+  #echo -e " mv  ${FILE_NAME} ${dw_dat}/core/archive" >> $EDW_LOG_FILE
+  #mv  ${FILE_NAME} ${dw_dat}/core/archive
+  #EXEC_FILEMV_ARC_RET_CODE=$?
+#done
+if  [ -s ${dw_dat}/gca/${FILE_SUFFIX}.lst ]
+then
+ls ${dw_dat}/gca/${FILE_SUFFIX}_*.csv > ${FILE_SUFFIX}.lst  ## file format example 1. cu_metrics_*.csv, 2. cu_metrics2_*.csv
+for file in `cat ${FILE_SUFFIX}.lst`
+do
+  echo echo -e " mv  ${file} ${dw_dat}/gca/archive " >> $EDW_LOG_FILE
+  mv  ${file} ${dw_dat}/gca/archive
+  EXEC_FILEMV_ARC_RET_CODE=$?
+done
+
+fi
+
+if [ $EXEC_FILEMV_ARC_RET_CODE -gt 0 ]
+then
+   echo -e 'Encountered Errors while moving files to archive directory, pls check log file .' >> $EDW_LOG_FILE
+   cat $EDW_LOG_FILE
+   exit $EXEC_FILEMV_ARC_RET_CODE
+fi
+
+cat $EDW_LOG_FILE
+
+4.
+#!/bin/ksh  
+#
+# File:     gca_db_auto_backfill.sh
+#
+# Purpose:  The script performs autobackfill for gca tables
+#           
+#
+# Author:   
+# Date:    
+#
+
+
+
+#===============================================================
+# Variables
+#===============================================================
+# if manually run we need to source this
+. $HOME/ops_cron_env.sh
+
+# Load ksh functions - all shell scripts should explicitly source this file
+. ${kshfn}
+
+
+
+#backfill date in mm/dd/yyyy format
+
+if  [[ $# -lt 1 ]]
+then
+  echo "** Error Running ${0} from Command line"
+  echo "** Required parameters missing"
+  echo "ex: gca_db_auto_backfill.sh table_name "
+  exit 1
+fi
+
+# local variables
+table_name=${1:?[Error: Required Parameter Table Name ]}
+
+
+
+EDW_LOG_FILE=$EDW_LOGS/gca_auto_backfill_${table_name}_$(date +%Y%m%d).log
+
+
+get_db_connect_parms "ods_ops_s"
+echo "proc_gca_autobackfill('$table_name',v_error_msg);"
+ERROR_MSG=`$ORACLE_HOME/bin/sqlplus -s <<EOF | egrep -e "^error_msg|ORA-|SP2-"
+/@${db_id}
+set serveroutput on
+set linesize 200
+declare
+    v_error_msg VARCHAR2(1000);
+begin
+     PROC_GCA_AUTOBACKFILL('$table_name',v_error_msg);
+    dbms_output.put_line( v_error_msg);
+end;
+/
+exit
+EOF`
+echo "Error msg : $ERROR_MSG" >>$EDW_LOG_FILE
+
+if [[ -n $ERROR_MSG ]] 
+then  
+  echo -e "Encountered Errors while executing proc_gca_autobackfill, pls check log file $EDW_LOG_FILE" >>$EDW_LOG_FILE
+cat $EDW_LOG_FILE
+  exit 1
+else
+echo "Database Backfill completed successfully" >>$EDW_LOG_FILE
+cat $EDW_LOG_FILE
+exit 0
+fi
+
+5.
+#!/bin/ksh
+#
+# File:     dw_deploy.sh
+#
+# Purpose:  Deploy ETL code. 
+#           This script p4 syncs the install and the deploy scripts
+#           Then executes the sync'd files
+#
+# Author:   Jim Dow
+# Date:     07/08/09
+#
+
+#set -vx
+HOME=/oracle/mgmt
+export HOME
+usage()
+{
+cat << EOF
+
+USAGE: ${0##*/} [-dmcpfIvtiM?br] [-s PROJ NAME] [-S SCHEMA] [-u DW VERSION] [-D DB]
+
+This script is used deploy dw code.
+
+OPTIONS:
+  GENERAL OPTIONS:
+   -p              Performs P4 sync
+   -f              if the -p option is set, force syncing over writable files
+                   (after backing up and writable files)
+   -c              Performs Package Compiles
+   -S [SCHEMA]     Ignore dschema from ops_cron_env.sh and use schema provided as parameter
+   -D [DB]         Ignore from ops_cron_env.sh and use DB provided as parameter
+   -M              Performs metadata rebuild operations
+
+  UPGRADE OPTIONS: Requires <DW VERSION> to be specified.
+   -u              Specifies upgrade DW Version.
+   -d              Performs DDL upgrade operations
+   -m              Performs DML upgrade operations
+   -I              Performs Informatica object import operations
+   -s [PROJ NAME]  Ignore deploy.list, and instead, use project name provided as second parameter
+
+  BUILD OPTIONS:
+   -b              Performs schema build operations (Requires -S/-D option if multiple schemas on db)
+   -r              Performs clean/clear schema operations before build (Requires -S/-D option if multiple schemas on db) (overrides -b)
+
+  HELP/UTILITY/INFO OPTIONS:
+   -t              Placeholder [Performs connectiviy tests]
+   -v              Placeholder [Gathers DW version information]
+   -i              Placeholder [Gets server id]
+   -?              This help text.
+
+  -ubktvi? Options are mutually exclusive with the exception of bk which are valid options with eachother
+
+  --No parameters were found = No DDL, No DML, No Pkg Compile will execute--
+
+EOF
+}
+
+#=========================================================
+#Parse out the parameters/arguments
+#=========================================================
+
+opts="$@"
+ddlflag=false
+dmlflag=false
+compileflag=false
+p4syncflag=false 
+p4forceflag=false
+informaticaflag=false
+singlefile=false
+metadataflag=false
+schemaflag=false
+buildflag=false
+versionflag=false
+testflag=false
+getsidflag=false
+rebuildflag=false
+upgradeflag=false
+dbflag=false
+
+while getopts 'dmcpfIs:rS:D:bvtiMu:?' OPTION
+do
+  case $OPTION in
+  d) ddlflag=true
+  ;;
+  m) dmlflag=true
+  ;;
+  c) compileflag=true
+  ;;
+  p) p4syncflag=true
+  ;;
+  f) p4forceflag=true
+  ;;
+  I) informaticaflag=true
+  ;;
+  s) singlefile=true
+     singlefilename=$OPTARG
+  ;;
+  M) metadataflag=true #Stub for rebuilding metadata
+  ;;
+  S) schemaflag=true #deploying to single schema, overriding dschema in ops_cron_env.sh
+     schemaname=$OPTARG
+  ;;
+  D) dbflag=true #Specify db
+     dbname=$OPTARG
+  ;;
+  b) buildflag=true #Stub for building out schemas from scratch
+  ;;
+  v) versionflag=true # Stub for getting version info
+  ;;
+  t) testflag=true #Stub for test connection
+  ;;
+  i) getsidflag=true #Stub for get server id
+  ;;
+  r) rebuildflag=true #Stub to Clean/clear schema before building
+  ;;
+  u) upgradeflag=true
+     VER=$OPTARG
+  ;;
+  ?) usage
+     exit
+  ;;
+esac
+done
+shift $(( $OPTIND - 1 ))
+
+#===============================================================
+# Valid options?
+#===============================================================
+
+#If no options, print usage and exit
+if [ "$ddlflag" = false ] &&
+[ "$dmlflag" = false ] &&
+[ "$compileflag" = false ] &&
+[ "$p4syncflag" = false ] &&
+[ "$p4forceflag" = false ] &&
+[ "$informaticaflag" = false ] &&
+[ "$singlefile" = false ] &&
+[ "$metadataflag" = false ] &&
+[ "$schemaflag" = false ] &&
+[ "$buildflag" = false ] &&
+[ "$versionflag" = false ] &&
+[ "$testflag" = false ] &&
+[ "$getsidflag" = false ] &&
+[ "$rebuildflag" = false ] &&
+[ "$upgradeflag" = false ] &&
+[ "$dbflag" = false ]
+then
+  usage
+  exit
+fi
+
+#Enforce Requirement for upgrade flag for any upgrade operations
+if [ "$ddlflag" = true ] || [ "$dmlflag" = true ] || [ "$singlefile" = true ] || [ "$informaticaflag" = true ]
+then
+  if [ -z "$VER" ]
+  then
+    echo "Specified options require <DW VERSION> to be specified."
+    usage
+    exit
+  fi
+fi
+
+#enforce no other flags accepted for testflag
+if [[ "$testflag" = true && "$versionflag" = true ]] ||
+   [[ "$testflag" = true && "$getsidflag" = true ]] ||
+   [[ "$testflag" = true && "$buildflag" = true ]] ||
+   [[ "$testflag" = true && "$rebuildflag" = true ]] ||
+   [[ "$testflag" = true && "$upgradeflag" = true ]] ||
+   [[ "$testflag" = true && "$p4syncflag" = true ]] ||
+   [[ "$testflag" = true && "$p4forceflag" = true ]] ||
+   [[ "$testflag" = true && "$metadataflag" = true ]] ||
+   [[ "$testflag" = true && "$compileflag" = true ]]
+then
+  echo "Test Option does not allow for other flags."
+  usage
+  exit
+fi
+
+#enforce no other flags accepted for versionflag
+if [[ "$versionflag" = true && "$testflag" = true ]] ||
+   [[ "$versionflag" = true && "$getsidflag" = true ]] ||
+   [[ "$versionflag" = true && "$buildflag" = true ]] ||
+   [[ "$versionflag" = true && "$rebuildflag" = true ]] ||
+   [[ "$versionflag" = true && "$upgradeflag" = true ]] ||
+   [[ "$versionflag" = true && "$p4syncflag" = true ]] ||
+   [[ "$versionflag" = true && "$p4forceflag" = true ]] ||
+   [[ "$versionflag" = true && "$metadataflag" = true ]] ||
+   [[ "$versionflag" = true && "$compileflag" = true ]]
+then
+  echo "Version Option does not allow for other flags."
+  usage
+  exit
+fi
+
+#enforce no other flags accepted for getsidflag
+if [[ "$getsidflag" = true && "$testflag" = true ]] ||
+   [[ "$getsidflag" = true && "$versionflag" = true ]] ||
+   [[ "$getsidflag" = true && "$buildflag" = true ]] ||
+   [[ "$getsidflag" = true && "$rebuildflag" = true ]] ||
+   [[ "$getsidflag" = true && "$upgradeflag" = true ]] ||
+   [[ "$getsidflag" = true && "$p4syncflag" = true ]] ||
+   [[ "$getsidflag" = true && "$p4forceflag" = true ]] ||
+   [[ "$getsidflag" = true && "$metadataflag" = true ]] ||
+   [[ "$getsidflag" = true && "$compileflag" = true ]]
+then
+  echo "Get Server ID Option does not allow for other flags."
+  usage
+  exit
+fi
+
+#Enforce Upgrade and Build exclusive flags
+if [[ "$upgradeflag" = true ]]
+then
+  if [[ "$ddlflag" = false && "$dmlflag" = false && "$informaticaflag" = false ]] || [[ "$buildflag" = true || "$rebuildflag" = true ]]
+  then
+    echo "Options missing or not allowed with Upgrade Option."
+    usage
+    exit
+  fi
+fi
+
+if [[ "$buildflag" = true && "$rebuildflag" = true ]]
+then
+  echo "Build and Rebuild Options are mutually exclusive."
+  usage
+  exit
+fi
+
+#===============================================================
+# Variables
+#===============================================================
+
+. $HOME/ops_cron_env.sh
+
+# Load ksh functions - all shell scripts should explicitly source this file
+. ${kshfn}
+
+# Local variables
+exec_dttm=`date '+%Y%m%d_%H%M%S'`
+log_file=${dw_ins}/dw_deploy_${exec_dttm}.log
+mrk_file=${dw_ins}/dw_deploy_${exec_dttm}.mrk
+
+touch ${mrk_file}
+
+echo "time: ${exec_dttm}"
+echo "time: ${exec_dttm}" >${log_file} 2>&1
+
+
+echo "=============================================================" 
+echo "Running ${0}" 
+echo "GENERAL OPTIONS:"
+echo "  Run P4 Sync          =${p4syncflag}"
+echo "         Force         =${p4forceflag}"
+echo "  Run Metadata Rebuild =${metadataflag} "
+echo "  Run Pkg Compile      =${compileflag}"
+echo "  Run Schema Only      =${schemaflag} ${schemaname} "
+echo "  Logging to:  ${log_file}"
+echo "UPGRADE OPTIONS:"
+echo "  Upgrade to Version   =${VER} "
+echo "  Run DDL              =${ddlflag} "
+echo "  Run DML              =${dmlflag} "
+echo "  Run Informatica      =${informaticaflag} "
+echo "  Run Single File      =${singlefile} ${singlefilename} "
+echo "BUILD OPTIONS:"
+echo "  Run Schema Build     =${buildflag} ${bdb}"
+echo "  Run Clean Schema     =${rebuildflag} ${bdb}"
+echo "HELP/UTILITY/INFO OPTIONS:"
+echo "  Test Connectivity    =${testflag} "
+echo "  Get DW Version       =${versionflag} "
+echo "  Get App Server ID    =${getsidflag} "
+echo "=============================================================" 
+
+echo "=============================================================" >>${log_file} 2>&1
+echo "Running ${0}" >>${log_file} 2>&1
+echo "GENERAL OPTIONS:" >>${log_file} 2>&1
+echo "  Run P4 Sync          =${p4syncflag}" >>${log_file} 2>&1
+echo "         Force         =${p4forceflag}" >>${log_file} 2>&1
+echo "  Run Metadata Rebuild =${metadataflag} " >>${log_file} 2>&1
+echo "  Run Pkg Compile      =${compileflag}" >>${log_file} 2>&1
+echo "  Run Schema Only      =${schemaflag} ${schemaname} " >>${log_file} 2>&1
+echo "  Logging to:  ${log_file}" >>${log_file} 2>&1
+echo "UPGRADE OPTIONS:" >>${log_file} 2>&1
+echo "  Upgrade to Version   =${VER} " >>${log_file} 2>&1
+echo "  Run DDL              =${ddlflag} " >>${log_file} 2>&1
+echo "  Run DML              =${dmlflag} " >>${log_file} 2>&1
+echo "  Run Informatica      =${informaticaflag} " >>${log_file} 2>&1
+echo "  Run Single File      =${singlefile} ${singlefilename} " >>${log_file} 2>&1
+echo "BUILD OPTIONS:" >>${log_file} 2>&1
+echo "  Run Schema Build     =${buildflag} ${bdb}" >>${log_file} 2>&1
+echo "  Run Clean Schema     =${rebuildflag} ${bdb}" >>${log_file} 2>&1
+echo "HELP/UTILITY/INFO OPTIONS:" >>${log_file} 2>&1
+echo "  Test Connectivity    =${testflag} " >>${log_file} 2>&1
+echo "  Get DW Version       =${versionflag} " >>${log_file} 2>&1
+echo "  Get App Server ID    =${getsidflag} " >>${log_file} 2>&1
+echo "=============================================================" >>${log_file} 2>&1
+
+#====================================================================
+# Before we get started check if -s is used there is an associated 
+# filename param If not bomb out
+#======================================================================
+ 
+if [ "${singlefile}" = true ]
+ then
+    if [ -z "${singlefilename}"  ]
+      then    
+         echo "****"  |tee -a ${log_file}
+         echo " '-s' option used, but no Filename parameter supplied" |tee -a ${log_file}
+         echo "Fail, Exiting...."   |tee -a ${log_file}
+         rm -f ${mrk_file}
+         exit 1
+     fi
+fi
+
+if [ "${schemaflag}" = true ]
+then
+  if [ -z "${schemaname}" ]
+  then
+    echo "****"  |tee -a ${log_file}
+    echo " '-S' option used, but no schema name parameter supplied" |tee -a ${log_file}
+    echo "Fail, Exiting...."   |tee -a ${log_file}
+    rm -f ${mrk_file}
+    exit 1
+  else
+    schemalist=${schemaname}
+  fi
+else
+  schemalist=${deploy_schemas}
+fi
+
+#======================================================================
+# Begin P4 sync Operation -- Pending to test this piece out.
+#======================================================================
+
+if [ "${p4syncflag}" = true ]
+then
+  echo "===============================================================" >>${log_file} 2>&1
+  echo " Sync to P4 Repo"
+  echo " Sync to P4 Repo" >>${log_file} 2>&1
+  echo "===============================================================" >>${log_file} 2>&1
+
+  stat_hdr "***Sync to P4 Repo" >>${log_file} 2>&1
+  if [ "${p4forceflag}" = true ]
+  then
+    # before we forc p4sync, back writable up file
+    for vfile in `ls -l *.[sp][hly]|grep ^-rw|cut -c51-200`
+    do
+      cp ${vfile} ${vfile}.${exec_dttm} >>${log_file} 2>&1
+    done
+    if [[ ! -z ${RPS_SYNC_FLAG} && "${RPS_SYNC_FLAG}" -eq "1" ]]
+    then
+      # Run the RPS sync script
+      rps_sync.sh force >>${log_file} 2>&1
+    else
+      #Force the sync overwriting 'writable' files                  
+      p4 sync -f  >>${log_file} 2>&1
+    fi            
+  else
+    if [[ ! -z ${RPS_SYNC_FLAG} && "${RPS_SYNC_FLAG}" -eq "1" ]]
+    then
+      # Run the RPS sync script
+      rps_sync.sh >>${log_file} 2>&1
+    else
+      #Run the P4 sync for the files 
+      p4 sync  >>${log_file} 2>&1
+    fi
+    # p4 sync sometimes doesnt complte before passing command back
+    # to calling script....so sleepp for a bit to ensure we have fresh files
+    echo  >>${log_file} 2>&1
+    echo "sleeping for 15 seconds after p4 to be sure it finishes " >>${log_file} 2>&1
+    sleep 15
+    echo >>${log_file} 2>&1
+  fi
+else
+  echo "Deploy Info/Warning: P4 Sync not executed" >>${log_file}
+fi
+
+grep "no such file(s)" ${log_file}
+if [[ ${?} = 0  ]]
+  then
+    echo "P4 Sync has Errors: refer to ${log_file} for details" >>${log_file} 2>&1
+    echo "P4 Sync has Errors: refer to ${log_file} for details" 
+    rm -f ${mrk_file}
+    exit 1
+fi
+
+grep "t clobber writable file" ${log_file}
+if [[ ${?} = 0  ]]
+  then 
+    echo "***************************************************" >>${log_file} 2>&1
+    echo "P4 Sync has Errors: refer to ${log_file} for details" >>${log_file} 2>&1
+    echo " Exiting Aborting Deploy..."
+    echo "***************************************************" >>${log_file} 2>&1
+    echo "P4 Sync has Errors: refer to ${log_file} for details" 
+    echo " Exiting Aborting Deploy..."
+    rm -f ${mrk_file}
+    exit 1
+fi
+
+grep "Your session has expired, please login again" ${log_file}
+if [[ ${?} = 0  ]]
+  then 
+    echo "***************************************************" >>${log_file} 2>&1
+    echo "P4 Sync has Errors: ***Not Logged Into P4, Sync Failed*** - refer to ${log_file} for details" >>${log_file} 2>&1
+    echo " Exiting Aborting Deploy..."
+    echo "***************************************************" >>${log_file} 2>&1
+    echo "P4 Sync has Errors: ***Not Logged Into P4, Sync Failed*** - refer to ${log_file} for details" 
+    echo " Exiting Aborting Deploy..."
+    rm -f ${mrk_file}
+    exit 1
+fi
+
+grep "rps backup has been taken" ${log_file}
+if [[ ${?} = 0  ]]
+  then 
+    echo "***************************************************" >>${log_file} 2>&1
+    echo " RPS Sync has Errors: refer to ${log_file} for details" >>${log_file} 2>&1
+    echo " Exiting Aborting Deploy..."
+    echo "***************************************************" >>${log_file} 2>&1
+    echo " RPS Sync has Errors: refer to ${log_file} for details" 
+    echo " Exiting Aborting Deploy..."
+    rm -f ${mrk_file}
+    exit 1
+fi
+
+echo "===================================================================" >>${log_file} 2>&1
+echo " chmod all binaries to executeable" >>${log_file} 2>&1
+echo "==============================================================" >>${log_file} 2>&1
+chmod ug+x ${dw_bin}/*.sh
+#chmod ug+x ${dw_bin}/*.pl
+#chmod ug+x ${dw_bin}/*.ksh
+#chmod ug+x ${dw_bin}/*.py
+
+#======================================================================
+# List projects in specified upgrade directory per upgrade option
+#======================================================================
+
+if [ "${upgradeflag}" = true ]
+then
+  echo "===============================================================" >>${log_file} 2>&1
+  echo " Projects to Deploy"
+  echo " Projects to Deploy" >>${log_file} 2>&1
+  echo "===============================================================" >>${log_file} 2>&1
+  if [ "${singlefile}" = true ]
+  then
+     proj_list=${singlefilename}
+  else
+     proj_list=$( grep -v "#" ${dw_ins}/${VER}/deploy.list )
+  fi
+ 
+  for proj in ${proj_list}
+  do 
+    echo "   => ${proj}"
+    echo "   => ${proj}" >>${log_file} 2>&1
+  done    
+  echo "==============================================================="
+  echo running deploy....
+  echo "===============================================================" >>${log_file} 2>&1
+  echo
+
+
+fi
+
+if [ "$buildflag" = true ] || [ "$rebuildflag" = true ]
+then
+  #echo "STUB BUILD/REBUILD SCHEMA"
+  echo "running   ${dw_bin}/main_dw_deploy_bld.sh ${opts} ${exec_dttm} ${log_file}" >>${log_file} 2>&1
+  ${dw_bin}/main_dw_deploy_bld.sh ${opts} ${exec_dttm} ${log_file} >>${log_file} 2>&1
+fi
+
+if [ "${upgradeflag}" = true ] || [ "${compileflag}" = true ] || [ "${metadataflag}" = true ]
+then
+  echo "running   ${dw_bin}/main_dw_deploy_upgd.sh ${opts} ${exec_dttm} ${log_file}" >>${log_file} 2>&1
+  ${dw_bin}/main_dw_deploy_upgd.sh ${opts} ${exec_dttm} ${log_file} >>${log_file} 2>&1
+fi
+
+if [ "$versionflag" = true ]
+then
+  echo "STUB GET DW VERSION"
+fi
+if [ "$testflag" = true ]
+then
+  echo "STUB TEST CONNECTION"
+fi
+if [ "$getsidflag" = true ]
+then
+  echo "STUB GET SERVER ID"
+fi
+
+# grep thru logs and .out files looking for issues, append to end of log file
+
+echo "=============================================================" >>${log_file}.err 2>&1
+echo "=============================================================" >>${log_file}.err 2>&1
+echo "End Deploy Log: Error Summary Below">>${log_file}.err 2>&1
+echo "=============================================================" >>${log_file}.err 2>&1
+echo "=============================================================" >>${log_file}.err 2>&1
+
+echo
+echo "=============================================================" >>${log_file}.err 2>&1
+echo " Info/Warnings " >>${log_file}.err 2>&1
+echo "=============================================================" >>${log_file}.err 2>&1
+echo
+grep -nH "Deploy Info/Warning"  ${log_file}>>${log_file}.err 2>&1
+
+echo
+echo "=============================================================" >>${log_file}.err 2>&1
+echo " Fatal Errors " >>${log_file}.err 2>&1
+echo "=============================================================" >>${log_file}.err 2>&1
+
+grep -nH "Warning: Package Body created with compilation errors." ${log_file} >>${log_file}.err 2>&1
+if [[ ${?} = 0  ]]
+  then
+  err="Y"
+fi
+grep -nH "PL/SQL: ORA" ${log_file} >>${log_file}.err 2>&1
+if [[ ${?} = 0  ]]
+  then
+    err="Y"
+fi
+#if  [ "${ddlflag}" = true ] || [ "${dmlflag}" = true ]
+if  [ "${upgradeflag}" = true ]
+then 
+    for dschema in ${schemalist}
+    do
+      if [ -f "${dw_ins}/${VER}/${dschema}/*${exec_dttm}.out" ]
+      then
+        grep -nH "\*\*\*"  ${dw_ins}/${VER}/${dschema}/*${exec_dttm}.out 2>/dev/null >>${log_file}.err 2>&1
+        if [[ ${?} = 0  ]]
+        then
+          err="Y"
+        fi
+      fi
+    done
+fi
+grep -nH "SP2-" ${log_file} >>${log_file}.err 2>&1
+if [[ ${?} = 0  ]]
+  then
+    err="Y"
+fi
+grep -nH "ORA-" ${log_file} >>${log_file}.err 2>&1
+if [[ ${?} = 0  ]]
+  then
+    err="Y"
+fi
+
+grep -nH "\*\*\*INFA:ERROR\*\*\*" ${log_file} >>${log_file}.err 2>&1
+if [[ ${?} = 0  ]]
+  then
+    err="Y"
+fi
+
+# combine errors back into main log file
+cat ${log_file} ${log_file}.err > ${log_file}.tmp
+mv ${log_file}.tmp ${log_file}
+
+echo " dw_deploy.sh completed..." >>${log_file}.err 2>&1
+echo "=============================================================" >>${log_file}.err 2>&1
+echo " dw_deploy.sh completed..."
+
+if [[ ${err} = "Y" ]]
+  then 
+    echo "Errors in log file:"
+    echo "Refer to End of file ${log_file} for details"
+    echo "Errors Summarized in the following format:" 
+    echo "{file} : {line} : {Error text}" 
+    echo "============================================================="
+      v_lines=`wc -l ${log_file}|cut -d\  -f1`
+      v_start=`grep -n "Fatal Errors"  ${log_file} |cut -d:  -f1`
+      v_tail_lines=$(( ${v_lines} - ${v_start} + 1 ))
+      
+      tail -${v_tail_lines} ${log_file} | head -10
+      if [ ${v_tail_lines} -ge 10 ]
+        then
+          echo
+          echo "****more Errors present in Log file ****"
+          echo "**** Only First 10 Lines printed    ****"
+      fi
+else
+    echo "No errors found during grep of log and .out files" 
+fi
+
+
+
+rm -f ${mrk_file}
+#EOF
+
+6.
+#!/bin/ksh
+#
+# File:     extract_partition_map.sh
+#
+# Purpose:  ETL to pull a jsp page containing the latest
+#           hash partition assignments to the RAC nodes
+#           and populate a app db lookup table 
+#           used to direct node level app db queries 
+#
+# Author:   Jim Dow
+# Date:     08/21/08
+#
+#set -vx
+#******************************************
+#FIXME move to BASS.NODE_TO_PARTITION_MAPPING
+#*******************************************
+
+
+# Load ksh functions - all shell scripts should explicitly source this file
+. ${kshfn}
+
+
+
+
+if [ -z ${1} ]
+  then
+  echo " USAGE: ${0}  [APP DB NAME]  [Run Date {YYMMDD} (optional)]"
+  echo "   Example #1:   > ${0} NADB1"
+  echo "   Example #2    > ${0} NADB1 080601"
+  exit 1
+fi
+
+#==================================================
+# Check to see if we are running in manual restart
+#  mode - if so we will have an additional qry/run
+#  date input param
+#==================================================
+
+if  [[ -n ${2} ]]
+then
+  # if manually run we need to source this
+. $HOME/ops_cron_env.sh
+
+  # we just imported run date
+  # we now over-write it with the input date
+   run_date=$2
+   export run_date
+
+   get_core_db_connect_parms "${1}"
+
+  echo "** running from command line for db=${1} date=${2}"
+fi
+
+#==================================================
+# Set Variables
+#==================================================
+sql_file=${dw_sql}/dw_hash_node_${db_id}.sql
+jsp_file=${dw_dat}/${run_date}_${db_id}_simplePartitions.jsp
+mark_flag_file=${dw_log}/${run_date}_${db_id}_extract_partition_map.mrk
+load_flag_file=${dw_log}/${run_date}_${db_id}_extract_partition_map.flg
+
+# Clean up prior runs
+echo "Removing flag/mark files : ${load_flag_file}  ${mark_flag_file} "
+rm -f ${mark_flag_file} ${load_flag_file}
+
+#==================================================
+# Get Node/partional map form app server
+#==================================================
+
+#New wget code
+wget -e use_proxy=no ${db_url}/sfdc/simplePartitions.jsp -O${jsp_file}
+	# from prod 
+	# wget -O${jsp_file}  ${db_url}/sfdc/simplePartitions.jsp
+
+# Check exit code before continuing
+  if [[ ${?} != 0 ]]
+    then
+     echo "Exiting -error running:
+      echo     wget -O${dw_dat}/${run_date}_${db_id}_simplePartitions.jsp  ${db_url} "
+      exit 1
+   fi
+#==================================================
+# Create sql file to truncate and insert new values
+# into node partition mapp table
+#==================================================
+echo "truncate table tmp_dw_hash_node;" > ${sql_file}
+
+{ while read vline;do
+   
+  #clean up the spaces and delemiters
+
+   vline=`echo ${vline}|tr -d " "| tr "[,|:]" " "`
+  
+  vloop=1
+  for node_partition in ${vline}
+    do
+     if [[ ${vloop} = 1 ]]
+          then
+             node=${node_partition}
+             (( vloop+=1 ))
+          else
+             echo "insert into tmp_dw_hash_node(hash_id,node_id) values(${node_partition},${node}); "
+             (( vloop+=1 ))
+       fi
+     done
+done } < ${jsp_file} >>${sql_file}
+echo "commit;" >>${sql_file} 
+
+#==================================================
+#  if the page doesnt exists well get junk 404 html
+#  so Validate that we created a sql file 
+#  with 32 partition records (plus a truncate and
+#  commit)
+#==================================================
+
+if [[ `cat ${sql_file}|wc -l` -ne 34 ]]
+  then
+   echo " Error exiting - didn't recieve expected content from simplePartitions.jsp"
+   exit 1
+fi
+
+
+#================================================
+# Refresh the hash/node lookup table
+#=================================================
+
+#call SQL*Plus
+sqlplus -s<<EOF
+${db_un}/${db_pw}@${db_cs}
+
+whenever sqlerror exit failure
+
+define dw_sql="${dw_sql}"
+set timing on
+${outputon}
+${doenable}
+prompt ================================================
+prompt Running truncate/insert tmp_dw_hash_node
+prompt ================================================
+execute dwe_ext.dw_ext_jbrn_uid := dw_util.new_job_run('DWE', 'Update dw_hash_node: ${db_id}_${db_id} [${run_date}]');
+
+spool ${mark_flag_file}
+
+@${sql_file}
+
+
+merge into dw_hash_node dhn
+ using tmp_dw_hash_node tmp
+   on (tmp.hash_id=dhn.hash_id)
+ when matched then 
+   update set node_id=tmp.node_id
+ when not matched then
+   insert (hash_id,node_id)
+   values (tmp.hash_id,tmp.node_id);
+ 
+ commit;
+
+spool off
+exit
+EOF
+
+#===============================================================
+#If good exit make completion flag
+#===============================================================
+
+# If flag file not already there
+#    and there no ORA- errors in the log file
+# then make a flag file
+
+if [[ ${?} = 0  && -z `grep -i 'ORA-' ${mark_flag_file} `  ]]
+  then
+    echo "Making completion flag file : ${load_flag_file}"
+    touch ${load_flag_file}
+    rm -f ${mark_flag_file}
+  else
+    echo "error exit code from plsql. Flag file not created"
+    exit 1
+fi
+
+# EOF
+
+7.
+#!/bin/bash
+#
+# File:     rps_deploy.sh
+#
+# Purpose:  This script is going to copy the files from the RPS
+#           repositories to the production code base.
+#           For more information on the design for this script,
+#           please refer to the google doc present in the link below
+#           https://docs.google.com/a/salesforce.com/document/d/1DmKfwfcH6jtBNVaanLde1GYLd9tRMYXpErbzAZbti1Q/edit
+#
+# Author:   Samir Aryamane
+# Date:     10-March-2014
+#
+
+#========================================================
+# Make a call to the ops_cron script to set and
+# initialize the environment variables within the shell.
+#========================================================
+
+. $HOME/ops_cron_env.sh 2>/dev/null 1>/dev/null
+
+#========================================================
+# Load ksh functions - all shell scripts should explicitly source this file
+#========================================================
+
+. ${kshfn} 2>/dev/null 1>/dev/null
+
+#========================================================
+# Assign parameter values. If the force parameter is provided
+# to the script, then we will use that to not make the script
+# fail even if the backup needed to be taken before the sync starts.
+# Also the file is not removed from the final sync file
+#========================================================
+
+if [[ -n $1 ]]
+	then
+	force_flag=$1
+fi
+
+
+#========================================================
+# Logic to identify the latest installed Changelist directory
+# and the second latest directory to which we compare against
+# the current production code version.
+#========================================================
+
+cd $HOME/installed
+# Removed logic that conpares code with previous version
+#v2_CL=`ls -ltr | grep '^d' | grep it-edw__ | awk '{print $9}' | tail -2 | head -1`
+v3_CL=`ls -ltr | grep '^d' | grep it-edw__ | awk '{print $9}' | tail -1`
+
+#========================================================
+# If ${v2_CL} is null then make a full carbon copy of the
+# ${v3_CL} so that {v2_CL} is created. This part of the 
+# code will only be running on the initial deployment stage.
+#========================================================
+
+pid=$$
+
+if [ ${v2_CL} == ${v3_CL} ]
+then
+	v2_CL=it-edw__prod__${pid}_DEFAULT
+#	cp -fr $HOME/installed/${v3_CL} $HOME/installed/${v2_CL}
+fi
+
+#========================================================
+# Create full path variables for both the directories.
+#========================================================
+
+v2_CL_full_path=$HOME/edw
+v3_CL_full_path=$HOME/installed/${v3_CL}
+
+#========================================================
+# Code to identify the changed items from the v3 CL with
+# that of v2 CL.
+#========================================================
+
+
+rps_log_file=${dw_log}/rps_output_${pid}.log
+sorted_rps_log_file=${dw_log}/sorted_rps_output_${pid}.log
+
+touch ${rps_log_file}
+touch ${sorted_rps_log_file}
+
+# Compare files in Prod with latest RPS version staged
+diff -arq ${v3_CL_full_path}/it/edw/install ${v2_CL_full_path}/install >> ${rps_log_file}
+diff -arq ${v3_CL_full_path}/it/edw/prod/core ${v2_CL_full_path}/src >> ${rps_log_file}
+
+
+sort ${rps_log_file} >> ${sorted_rps_log_file}
+
+#========================================================
+# Parse the ouput list to create a uniform list in a
+# standardized format. Maybe a function will be more useful here.
+#========================================================
+rps_changes_file=${dw_log}/rps_changing_files_${pid}.log
+rps_new_file=${dw_log}/rps_new_files_${pid}.log
+final_rps_new_file=${dw_log}/final_rps_new_files_${pid}.log
+final_rps_changes_file=${dw_log}/final_rps_changing_files_${pid}.log
+rps_dmp_log_file=${dw_log}/rps_dmp_log_file_${pid}.log
+rps_v3_changes_for_rerun=${dw_log}/rps_v3_changes_for_rerun_${pid}.log
+
+touch ${rps_changes_file}
+touch ${rps_new_file}
+touch ${final_rps_new_file}
+touch ${final_rps_changes_file}
+touch ${rps_dmp_log_file}
+touch ${rps_v3_changes_for_rerun}
+
+#========================================================
+# Write the RPS package changes to the RPS dump log file.
+#========================================================
+echo "*********************************************************" >>${rps_dmp_log_file}
+echo "Changes observed on comparing v2_CL_full_path with v3_CL_full_path is as follows" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+cat ${sorted_rps_log_file} >>${rps_dmp_log_file}
+#========================================================
+
+# Parse the changed file, pick out the one's that differ.
+grep "^Files ${v3_CL_full_path}.*differ$" ${sorted_rps_log_file} >> ${rps_changes_file}
+
+# Parse the changed file, pick out the one's that are brand new.
+grep "^Only in ${v3_CL_full_path}.*" ${sorted_rps_log_file} >> ${rps_new_file}
+
+# The below command, copies the new files present in v3 but not in v2 of the ChangeList
+cat ${rps_new_file} | cut -f3- -d " " | tr -s ": " "/" >> ${final_rps_new_file}
+
+final_rps_new_for_rerun=${dw_log}/final_rps_v3_new_for_rerun_${pid}.log
+touch ${final_rps_new_for_rerun}
+
+cat ${rps_new_file} | cut -f3- -d " " | tr -s ": " "/" >> ${final_rps_new_for_rerun}
+
+# The below command loads the changes, which are to be copied over to the production
+# from the v3 CL file list.
+# Finally the new file will contain the New as well as differed values from the 
+# changes identified earlier.
+cat ${rps_changes_file} | cut -f2 -d " " >> ${final_rps_new_file}
+
+cat ${rps_changes_file} | cut -f2 -d " " > ${rps_v3_changes_for_rerun}
+cat ${final_rps_new_for_rerun} >> ${rps_v3_changes_for_rerun}
+
+#========================================================
+# Use this block to compare the changes identified within
+# v3 with that of current production run. If all the changed files
+# present in v3 are same as production, then skip the current run.
+# Make an exit.
+#========================================================
+
+echo "Starting comparison to check if the script is being re-run" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+rps_final_v3_changes_for_rerun=${dw_log}/rps_final_v3_changes_for_rerun_${pid}.log
+tmp_check_dup_file=${dw_log}/tmp_check_dup_file_${pid}.log
+touch ${rps_final_v3_changes_for_rerun}
+
+for val in $(cat ${rps_v3_changes_for_rerun})
+do
+	for x in $(cat ${dw_conf}/rps_client.conf)
+		do
+        	first_value=`echo ${x} | cut -f1 -d"#"`
+        	second_value=`echo ${x} | cut -f2 -d"#"`
+        	value=`echo ${val} | cut -f6- -d'/' | sed "s/${first_value}/${second_value}/g" | grep $HOME`
+            if [ ! -z ${value} ]
+                then
+                echo ${val}#${value} >> ${rps_final_v3_changes_for_rerun}
+            fi
+	done
+done
+
+for rerun_file_check in $(cat ${rps_final_v3_changes_for_rerun})
+do
+	source_file=`echo ${rerun_file_check} | cut -f1 -d"#"`
+	prod_file=`echo ${rerun_file_check} | cut -f2 -d"#"`
+	if [[ -d ${source_file} ]]
+	then
+	diff -arq  ${source_file} ${prod_file} 2>/dev/null 1>/dev/null
+	if [ $? -ne 0 ]
+		then
+		touch ${tmp_check_dup_file}
+	fi
+	else
+	cmp ${source_file} ${prod_file} 2>/dev/null 1>/dev/null
+	if [ $? -ne 0 ]
+		then
+		touch ${tmp_check_dup_file}
+	fi
+	fi	
+done
+
+rm -f ${final_rps_new_for_rerun}
+
+#========================================================
+# If the comparison on v3 files with current production 
+# passed for all the files being compared the touch file  
+# will not be created, hence you should exit out of the 
+# script succesfully and not proceeding with the syncing.
+#========================================================
+
+if [ ! -f ${tmp_check_dup_file} ]
+	then
+	echo "This script is being re-run, all the current prod files are in sync with latest v3 folder...exiting succesfully.." >>${rps_dmp_log_file}
+	echo "*********************************************************" >>${rps_dmp_log_file}
+	echo "This script is being re-run, all the current prod files are in sync with latest v3 folder...exiting succesfully.."
+	# Housekeeping of the files generated above.
+	rm -f ${rps_final_v3_changes_for_rerun} ${rps_log_file} ${sorted_rps_log_file} ${rps_changes_file} ${rps_new_file}
+	rm -f ${final_rps_new_file} ${final_rps_changes_file} ${rps_v3_changes_for_rerun}
+	exit 0
+fi
+
+echo "SUCCESS: Completed comparison to check if the script is being re-run. Script is running normally for the first time" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+# Only loads the changes, which are present in v2 of the ChangeList.
+cat ${rps_changes_file} | cut -f4 -d " " >> ${final_rps_changes_file}
+
+#========================================================
+# Using the standardized output created by the code above
+# compare those files with v2 CL to that of the production
+# copy of the code, using a loop code. (Only check if the
+# files compared within v2 and v3 are changed, new inserts
+# should not be compared with production copy.)
+#========================================================
+
+echo "*********************************************************" >>${rps_dmp_log_file}
+echo "Creating the v2 folder difference only file" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+rps_final_changed_diff_file=${dw_log}/final_rps_diff_file_${pid}.log
+touch ${rps_final_changed_diff_file}
+
+for val in $(cat ${final_rps_changes_file})
+do
+	for y in $(cat ${dw_conf}/rps_client.conf)
+		do
+			first_value=`echo ${y} | cut -f1 -d"#"`
+        	second_value=`echo ${y} | cut -f2 -d"#"`
+        	value=`echo ${val} | cut -f6- -d'/' | sed "s/${first_value}/${second_value}/g" | grep $HOME`
+        	if [ ! -z ${value} ]
+                then
+                echo ${val}#${value} >> ${rps_final_changed_diff_file}
+            fi
+	done
+done
+
+echo "SUCCESS: Created the v2 based folder difference only file" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+#========================================================
+# Generating the final file list for the New + Changed records. This file is needed
+# to be created so that if the compare fails, while taking the backup, we identify
+# the record that has to be removed from this final - to be synced file.
+#========================================================
+
+echo "Creating the difference for v3 folder containing the difference + new files" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+rps_final_copy_file=${dw_log}/final_rps_copy_file_${pid}.log
+touch ${rps_final_copy_file}
+
+for dat in $(cat ${final_rps_new_file})
+do
+	for x in $(cat ${dw_conf}/rps_client.conf)
+		do
+        	first_value=`echo ${x} | cut -f1 -d"#"`
+        	second_value=`echo ${x} | cut -f2 -d"#"`
+        	value=`echo ${dat} | cut -f6- -d'/' | sed "s/${first_value}/${second_value}/g" | grep $HOME`
+            if [ ! -z ${value} ]
+                then
+                echo ${dat}#${value} >> ${rps_final_copy_file}
+            fi
+	done
+done
+
+echo "SUCCESS: Created the v3 based folder for Difference + New files" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+# Now run the loop over the ${rps_final_changed_diff_file} to put the cmp command.
+# If the compare fails then backup the current production file into the $HOME/rps_backup
+# directory.
+
+# Make sure we have the rps_backup directory already created, if not go ahead and create it.
+mkdir -p $HOME/rps_backup
+
+echo "Starting compare operation for v2 difference file with current production files" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+
+for diff_file in $(cat ${rps_final_changed_diff_file})
+do
+	source_file=`echo ${diff_file} | cut -f1 -d"#"`
+	prod_file=`echo ${diff_file} | cut -f2 -d"#"`
+	cmp ${source_file} ${prod_file} > /dev/null
+	if [ $? -eq 0 ]
+		then
+		echo "Prod vs V2 no diff between: ${source_file} and ${prod_file}" >> ${rps_dmp_log_file}
+	elif [ $? -eq 1 ]
+		then
+		#========================================================
+		# If there is difference, copy the production files
+		# to the backup directory, and write them to a log and
+		# by writting error on the terminal.
+		#========================================================
+		echo "Prod file does not match with v2, taking a backup for: ${source_file}" >> ${rps_dmp_log_file}
+		# Write something to the TTY so that it goes into the log file, and fails the p4 from proceeding.
+		# Check if the force mode is present, then do not execute the below command.
+		if [ -z ${force_flag} ]
+			then
+			echo "rps backup has been taken for the file: ${source_file}"
+			# Now remove the file from the sync list which is to be deployed. Take the prod file grep it 
+			#from the final list and then using sed delete that line from the file inplace.
+			file_name_tbd=`basename ${prod_file}`
+			sed -i "/${file_name_tbd}/d" ${rps_final_copy_file}
+		fi
+		# Copy the prod file to the rps_backup.
+		prod_ver_file=`echo ${diff_file} | cut -f2 -d"#"`
+		cp --parents -fr ${prod_ver_file} $HOME/rps_backup/
+	else
+		echo "no such file(s) present for: ${prod_file}"
+		echo "Target file ${prod_file} does not exists" >>${rps_dmp_log_file}
+	fi
+done
+
+echo "SUCCESS: Completed the compare operation for v2 with current production files..see details above" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+#========================================================
+# If no difference is found in the copy of production and
+# v2 CL, go ahead and make the copy to production from v3
+# based on the changed file set between v3 and production.
+# which is New + Changed.
+#========================================================
+
+# Now run the loop over the ${rps_final_copy_file} to put the copy command.
+# The error thrown on the terminal, must be in compliance with what the
+# dw_deploy.sh scans and how it looks for error.
+
+echo "Starting the sync operation of copying the v3 new + old files into the current production environment" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+for cp_file in $(cat ${rps_final_copy_file})
+do
+	cp_source_file=`echo ${cp_file} | cut -f1 -d"#"`
+	cp_prod_file=`echo ${cp_file} | cut -f2 -d"#"`
+	if [[ ! -d ${cp_prod_file} ]]
+		then
+		cp -fr ${cp_source_file} ${cp_prod_file} > /dev/null
+		if [ $? -ne 0 ]
+			then
+			echo "Cant clobber writable files: ${cp_source_file} and ${cp_prod_file}"
+			else
+			echo "Success copying file: cp -fr ${cp_source_file} ${cp_prod_file}" >> ${rps_dmp_log_file}
+		fi
+	fi
+done
+
+echo "SUCCESS: Completed the sync operation of copying the v3 new + old files into the current production environment" >>${rps_dmp_log_file}
+echo "*********************************************************" >>${rps_dmp_log_file}
+
+#========================================================
+# Make a log of RPS of all the files that have changes and
+# also the new files being added. -- Done progressively
+# into the code.
+#========================================================
+
+#========================================================
+# Housekeeping task on deleting the files older than
+# 30 days to make sure the backup directory for RPS does
+# not outgrow and cause memory issues.
+# Remove any rps dump log files older than 30 days.
+# TEMPORARY CHANGE as for 9/11 release: Comment all the deletes of the log files.
+# No house keeping is being done. Make sure you uncomment this later.
+#========================================================
+
+
+rm -f ${rps_log_file} ${sorted_rps_log_file} ${rps_new_file} ${rps_changes_file} ${final_rps_new_file} ${final_rps_changes_file} ${rps_final_changed_diff_file}
+
+rm -f ${tmp_check_dup_file} ${rps_final_v3_changes_for_rerun} ${rps_final_copy_file} ${rps_v3_changes_for_rerun}
+
+#find $HOME/rps_backup/ -mtime +30 -exec rm {} \;
+
+#find ${dw_log}/rps_dmp_log_file*.log -mtime +30 -exec rm {} \;
+
+#========================================================
+# Exit out of the script, writing sync completed
+# succesfully to the terminal.
+#========================================================
+
+echo "RPS sync completed succesfully..."
+echo "RPS sync completed succesfully..." >> ${rps_dmp_log_file}
+exit 0
+
+8.
+
+#!/bin/ksh
+#
+# File:     extract_db_node.sh
+#
+# Purpose:  Shell script to do the extracts for a given SFDC
+#           application DB Node and load the data into the interface
+#           temp tables on the DW. this script should be called once for
+#           each of the source SFDC application DB nodes during a load cycle
+#
+#
+# Author:   Jim Dow
+# Date:     08/25/08
+#
+#set -vx
+
+# Load ksh functions - all shell scripts should explicitly source this file
+. ${kshfn}
+
+if [ -z ${3} ]
+  then
+  echo " USAGE: ${0}  [APP DB NAME] [DB NODE (1-4)] [RETRY (Y/N)] [Run Date {YYMMDD} (optional)] "
+  echo "   Example #1:   > ${0} NADB1 2 N"
+  echo "   Example #2    > ${0} NADB1 3 Y # retry=Y run but do not specify DB Node"
+  echo "   Example #3    > ${0} NADB1 3 N 080601"
+  exit 1
+fi
+
+#===============================================================
+# Variables
+#===============================================================
+#===============================================================
+# Check to see if we are running in manual restart mode
+#  if so we will see  run_date in params
+# If we are, do some necessary stand-alone-run tasks
+#===============================================================
+if  [[ -n ${4} ]]
+then
+
+   # if manually run we need to source this
+   . $HOME/ops_cron_env.sh
+
+   # we just imported a default run date from ops_cron_env
+   # we now over-write it with the input run date
+   run_date="${4}"
+   export run_date
+
+   echo "**Running ${0} from Command line "
+
+fi
+
+
+# Load ksh functions - this would have done nothing when done earlier)
+. ${kshfn}
+
+#get database parms (username password connect string,etc)
+#this is done redundantly to parent scripts to support
+#calling this script individually
+get_core_db_connect_parms "${1}"
+
+echo ----------
+echo ${db_id} ${db_cs}
+echo -----
+
+db_node="${2}"
+db_retry="${3}"
+stagetext="DW Processing at Source DB [${db_id}_${db_node}] "
+
+echo "Running for db id=${db_id} Node=${db_node} retry=${db_retry} Run Date =${run_date}"
+
+#===============================================================
+# Start of processing
+#===============================================================
+stat_hdr "$stagetext"
+
+
+#===============================================================
+# Filenameis for load flag file
+#===============================================================
+load_flag_file=${dw_log}/${run_date}_${db_id}_${db_node}_ext.flg
+mark_flag_file=${dw_log}/${run_date}_${db_id}_${db_node}_ext.mrk
+log_file=${dw_log}/${run_date}_${db_id}_${db_node}__extract_db_node.log
+
+echo "Removing flag/mark files : ${load_flag_file}  ${mark_flag_file} "
+rm -f ${mark_flag_file} ${load_flag_file}
+
+#===============================================================
+#set our node connection string
+#
+#if re-try flag is set connect to RAC, not to Rac Node
+#===============================================================
+
+if [ ${db_retry} = "Y" ]
+  then
+      db_node_cs="${db_cs}-${db_node}"
+  else
+      db_node_cs="${db_cs}-${db_node}"
+fi
+echo "Connection string set to: [${db_node_cs}]"
+
+#===============================================================
+# Load Temp Tables and Dump Data at source database
+#===============================================================
+
+#================================================================================================================
+# Note : TMP_cu_metrics,TMP_cu_metrics2 and tmp_cu_org_metrics_set* tables should be loaded before TMP_orgsummt
+#================================================================================================================
+
+# Call SQL*Plus
+sqlplus -s<<EOF
+${db_un}/${db_pw}@${db_node_cs}
+
+whenever sqlerror exit failure
+
+define dw_sql="${dw_sql}"
+set timing on
+${outputon}
+${doenable}
+prompt ================================================
+prompt Make Extract Job Record
+prompt ================================================
+execute dwe_ext.dw_ext_jbrn_uid := dw_util.new_job_run('DWE-Node', 'Extract DW Data: ${db_id}_${db_node} [${run_date}]');
+
+prompt ================================================
+prompt Truncating TMP tables
+host echo "Current Time: `date`"
+prompt ================================================
+host echo "Running dwe_ext_node.clear_ext_tables [${db_node}]"
+execute dwe_ext_node.clear_ext_tables ( ${db_node} );
+
+prompt ================================================
+prompt Loading TMP tables
+host echo "Current Time: `date`"
+prompt ================================================
+
+prompt ================================================
+prompt Loading TMP_cu_metrics table
+host echo "Current Time: `date`"
+prompt ================================================
+
+host echo "Running dwe_ext_node.load_cu_metrics [`date`] [${db_node}]"
+execute dwe_ext_node.load_cu_metrics (to_date('${run_date}','YYMMDD') -1,  ${db_node} );
+
+prompt ================================================
+prompt Loading TMP_cu_metrics2 table
+host echo "Current Time: `date`"
+prompt ================================================
+
+host echo "Running dwe_ext_node.load_cu_metrics2 [`date`] [${db_node}]"
+execute dwe_ext_node.load_cu_metrics2 (to_date('${run_date}','YYMMDD') -1,  ${db_node} );
+
+prompt ================================================
+prompt Loading tmp_cu_org_metrics_set* table
+host echo "Current Time: `date`"
+prompt ================================================
+
+host echo "Running dwe_ext_node.load_cu_org_metrics_set [`date`] [${db_node}]"
+execute dwe_ext_node.load_cu_org_metrics_set (to_date('${run_date}','YYMMDD') -1,  ${db_node} );
+
+prompt ================================================
+prompt Loading TMP_orgsummt table
+host echo "Current Time: `date`"
+prompt ================================================
+
+host echo "Running dwe_ext_node.load_orgsummt  [`date`] [${db_node}]"
+execute dwe_ext_node.load_orgsummt (to_date('${run_date}','YYMMDD') -1,  ${db_node} );
+
+prompt ================================================
+prompt Loading TMP_userlicst table
+host echo "Current Time: `date`"
+prompt ================================================
+
+host echo "Running dwe_ext_node.load_userlicst  [`date`] [${db_node}]"
+execute dwe_ext_node.load_userlicst (to_date('${run_date}','YYMMDD') -1,  ${db_node} );
+
+prompt ================================================
+prompt Committing all Temp work before extracts
+prompt ================================================
+commit;
+
+spool ${mark_flag_file}
+SELECT   msg_text
+    FROM message_log ml1
+   WHERE ml1.mslg_uid > (SELECT MAX (ml2.mslg_uid)
+                           FROM message_log ml2
+                           -- get latest run
+                          WHERE ml2.msg_text LIKE 'Clearing all DWE TMP tables%')
+     AND ml1.msg_text LIKE '%ORA-%'
+ORDER BY ml1.mslg_uid
+/
+spool off
+whenever sqlerror exit failure
+
+prompt ================================================
+prompt Completing Extract Job Record
+prompt ================================================
+execute dw_util.complete_job_run(dwe_ext.dw_ext_jbrn_uid);
+exit
+EOF
+
+#===============================================================
+#If good exit make completion flag
+#===============================================================
+
+# If flag file not already there
+#    and there no ORA- errors in the log file
+# then make a flag file
+
+if [[ ${?} = 0  && -z `grep -i 'ORA-' ${mark_flag_file} `  ]]
+  then
+    echo "Making completion flag file : ${load_flag_file}"
+    touch ${load_flag_file}
+    rm -f ${mark_flag_file}
+  else
+    #If this is a retry exit
+    if [ ${db_retry} = "Y" ]
+      then
+         echo "error exit code from plsql. Flag file not created"
+         exit 1
+
+       #If this isnt a 'Retry run' then exec the retry version
+       else
+
+          echo "--------------------------------------------------------   "
+          echo `date`
+          echo "Sleeping for ${retry_delay_seconds} before retrying extract"
+
+          #Wait for awhile in case the failed node was in maintenance mode
+          sleep ${retry_delay_seconds}
+
+          db_logfile="${dw_log}/${run_date}_${db_id}_${db_node}r__extract_db_node.log"
+
+          echo "--------------------------------------------------------       "
+          echo "Retrying load for DB [${db_id}-${db_node}] - details available in "
+          echo " - ${db_logfile}                                               "
+          echo "--------------------------------------------------------       "
+
+          # Launch the retry job
+          ${dw_bin}/extract_db_node.sh ${db_id} ${db_node} Y > ${db_logfile} 2>&1
+
+          if [[ ${?} != 0 ]]
+           then
+           exit 1
+          fi
+    fi
+
+fi
+
+# EOF
+
+
