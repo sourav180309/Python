@@ -1,0 +1,31 @@
+# Triggering EMR creation
+def provision(artifact_id, emr_name, job_name, env_type, sns_arn, config):
+	client = boto3.client("servicecatalog", region_name="us-west-2")
+        response = client.provision_product(
+            ProductId=config[env_type]["ProductId"],
+            ProvisioningArtifactId=artifact_id,
+            ProvisionedProductName=emr_name,
+            ProvisioningParameters=[......................]
+			
+provision_id, record_id = provision(artifact_id, emr_name, job_name, env_type, sns_arn, config)
+
+# Terminating EMR 
+client = boto3.client("servicecatalog", region_name="us-west-2")
+response = client.terminate_provisioned_product(
+                ProvisionedProductName=svc_ctlg_name,
+                IgnoreErrors=False
+            )
+
+
+Start and Stop spark session
+SparkSession.builder.appName(spark_application_name).enableHiveSupport().getOrCreate()
+spark.stop()
+Python boto3 AWS SDK
+List s3 buckets 
+# Retrieve the list of existing buckets
+s3 = boto3.client('s3')
+response = s3.list_buckets()
+# Output the bucket names
+print('Existing buckets:')
+for bucket in response['Buckets']:
+    print(bucket["Name"])
