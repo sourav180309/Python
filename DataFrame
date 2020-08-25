@@ -1,0 +1,158 @@
+import pandas as pd
+df=pd.DataFrame({'Name':['sourav','kevin','sam'], 'Age':[40,45,60], 'salary':[2000,4000,1000]})
+df.head()
+df.shape # Number of rows and columns 
+df.dtypes
+df['Name']
+df.Name # same as df['Name']
+df['new column']=df.Salary + df.Age # add a new column
+df.drop('new column', axis=1, inplace=True) # drop a column
+df.drop('lambda',axis=1, inplace=True) # drop a column
+df.drop(['column1''column2'], axis=1, inplace=True) # drop multiple columns
+df.head()
+df.loc[0:2,'Name':'salary']
+df.describe()
+
+df[df.salary>3000] # Filter
+
+#Given a data frame, “comp”. There are two fields, Employee and PayType. 
+PayType’s values are Salary and Hourly. 
+Write a lambda function that creates a new column in the comp data frame called “Exempt.” 
+If the PayType = Hourly then Exempt = ’N.’ If PayType = ‘Salary’ then Exempt = ‘Y’
+
+df['Length'] = df['Name'].apply(len)
+
+df['Exempt'] = df['salary'].apply(lambda x: 'Y' if x > 2000 else 'N')
+
+df['Lname'] = df['Name'].map({'sourav':'s','kevin':'k','sam':'m'})
+
+df=pd.DataFrame({'Name':['sourav','kevin','lily'], 'Age':[40,45,60], 'salary':[2000,4000,1000], 'Sex':['male','male','female']})
+df.head()
+df['Lname'] = df['Name'].map({'sourav':'M','kevin':'M','lily':'F'})
+
+df['lambda'] = df['Sex'].apply(lambda x: 'Y' if x == 'male' else 'N')
+df['new']=df['salary'].apply(lambda x: 'HIGH' if x >= 3000 else 'LOW')
+
+import json
+
+data='''{
+  "states": [
+    {
+      "name": "Alabama",
+      "abbreviation": "AL",
+      "area_codes": ["205", "251", "256", "334", "938"]
+    },{
+      "name": "Wisconsin",
+      "abbreviation": "WI",
+      "area_codes": ["262", "414", "534", "608", "715", "920"]
+    },
+    {
+      "name": "Wyoming",
+      "abbreviation": "WY",
+      "area_codes": ["307"]
+    }
+  ]
+}'''
+str=json.loads(data)
+
+for i in (str['states']):
+     print(i['name'])
+	 
+for i in (str['states']):
+     del (i['area_codes'])
+	 
+new_str=json.dumps(str)
+print(new_str)	 
+
+https://www.youtube.com/watch?v=9N6a-VLBa2I
+
+
+>>> for index , i in enumerate(list2, start=2):  ## enumerate function will maintain the index 
+...  print(index,i)
+...
+(2, 'a')
+(3, 'b')
+(4, 'c')
+(5, 'd')
+
+>>> for i , j in zip(list1, list2):  ##using zip function loop through multiple lists 
+...  print(i,j)
+...
+(1, 'a')
+(2, 'b')
+(3, 'c')
+(4, 'd')
+
+>>
+
+>>> import pandas as pd
+>>> data={
+  "states": [
+    {
+      "name": "Alabama",
+      "abbreviation": "AL",
+      "area_codes": ["205", "251", "256", "334", "938"]
+    },{
+      "name": "Wisconsin",
+      "abbreviation": "WI",
+      "area_codes": ["262", "414", "534", "608", "715", "920"]
+    },
+    {
+      "name": "Wyoming",
+      "abbreviation": "WY",
+      "area_codes": ["307"]
+    }
+  ]
+}
+>>> type(data)
+<type 'dict'>
+>>> df_data=pd.DataFrame(data)
+>>> type(df_data)
+<class 'pandas.core.frame.DataFrame'>
+
+>>> data={
+...   "states": [
+...     {
+...       "name": "Alabama",
+...       "abbreviation": "AL",
+...       "area_codes": ["205", "251", "256", "334", "938"]
+...     },{
+...       "name": "Wisconsin",
+...       "abbreviation": "WI",
+...       "area_codes": ["262", "414", "534", "608", "715", "920"]
+...     },
+...     {
+...       "name": "Wyoming",
+...       "abbreviation": "WY",
+...       "area_codes": ["307"]
+...     }
+...   ]
+... }
+>>> type(data)
+<type 'dict'>
+>>> type(data['states'])
+<type 'list'>
+>>> type(data['states'][0])
+<type 'dict'>
+>>> type(data['states'][1])
+<type 'dict'>
+>>> type(data['states'][1]['name'])
+<type 'str'>
+>>> print(data['states'][1]['name'])
+Wisconsin
+>>> print(data['states'][0]['name'])
+Alabama
+>>> print(data['states'][0]['area_codes'])
+['205', '251', '256', '334', '938']
+
+data = {'Name': ['Sourav','John','David'], 'Dept':['sales','marketing','admin'], 'salary': [1000, 2000, 3000]}
+
+------------------------Oracle db connect 
+import cx_Oracle
+db = cx_Oracle.connect('edw_ops','edw_ops','sfmedwdbldascan.internal.salesforce.com:1531/bidwdev1')
+cursor=db.cursor()
+cursor.execute('select * from OPS_ETL_VALIDATION')
+data = cursor.execute('select * from OPS_ETL_VALIDATION')
+print(len(cursor.fetchall()))
+cursor.close() 
+
