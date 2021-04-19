@@ -1,0 +1,369 @@
+# Databricks notebook source
+##> This process will load the 544 financial Calendar into Redshift Database using the below SQLs
+##> QTRday, YEARday and MONTHday will always start if SUN then 1, Mon then 2, Tue then 3, Wed then 4, Thr then -2, Fri then -1 and Sat then 0
+##> 1st Qtr Days could be more than 91 days in case of leap year(example 2020) for regular years its 91 days 
+##> Last Qtr number of days may be more or less than 91
+##> This for 544 financial Calendar 
+
+# COMMAND ----------
+
+# MAGIC %run ./../../../config/spot_config_db
+
+# COMMAND ----------
+
+##Sql Query to populate the stg table before loading the final date dimension table
+def fun_date_dim(input_year): 
+  #spotconfig()
+  start = datetime.datetime.now()
+  try:
+    curr_year=input_year
+    #date_para=dbutils.widgets.get("YEAR")+"-01-01"
+    date_year_input=("'"+str(curr_year)+"-01-01"+"'")
+    print(date_year_input)
+    date_sql=("""
+    select
+    w.date_year as date_year,
+    w.weekofyear as weekofyear,
+    w.weekno as weekno,
+    case 
+    when weekno <=10 then 1
+    when weekno > 10 and weekno <=23 then 2
+    when weekno > 23 and weekno <=36 then 3
+    when weekno > 36 and weekno <=49 then 4
+    end as qtr ,
+    actual_startoftheweek as startofweek,
+    actual_endtoftheweek as endofweek,
+    dayofweek,
+    dayofmonth,
+    dayofyear,
+    case   when weekofyear <=5 then 1
+           when weekofyear > 5 and weekofyear <=9 then 2
+           when weekofyear > 9 and weekofyear <=13 then 3
+           when weekofyear > 13 and weekofyear <=18 then 4
+           when weekofyear > 18 and weekofyear <=22 then 5
+           when weekofyear > 22 and weekofyear <=26 then 6
+           when weekofyear > 26 and weekofyear <=31 then 7
+           when weekofyear > 31 and weekofyear <=35 then 8
+           when weekofyear > 35 and weekofyear <=39 then 9
+           when weekofyear > 39 and weekofyear <=44 then 10
+           when weekofyear > 44 and weekofyear <=48 then 11
+           when weekofyear > 48  then 12
+    end monthofyear,
+    weekdayofyear,
+    fiscal_year,
+    startofyear,
+    endofyear from 
+    (
+    select   
+    trunc(a.datum) as date_year,
+    weekofyear,
+    case   when weekofyear <=5 then 5
+           when weekofyear > 5 and weekofyear <=9 then 6
+           when weekofyear > 9 and weekofyear <=13 then 10
+           when weekofyear > 13 and weekofyear <=18 then 14
+           when weekofyear > 18 and weekofyear <=22 then 19
+           when weekofyear > 22 and weekofyear <=26 then 23
+           when weekofyear > 26 and weekofyear <=31 then 27
+           when weekofyear > 31 and weekofyear <=35 then 32
+           when weekofyear > 35 and weekofyear <=39 then 36
+           when weekofyear > 39 and weekofyear <=44 then 40
+           when weekofyear > 44 and weekofyear <=48 then 45
+           when weekofyear > 48  then 49
+    end weekno,
+    trunc(case when weekofyear=1 then DATE_TRUNC('year', datum)
+         when DATE_PART('year', startofweek) = DATE_PART('year', datum)
+         then startofweek else startofweek+7 end) as "actual_startoftheweek",
+    trunc(case when weekofyear=52 then DATE_TRUNC('year', datum)+364
+               when weekofyear=53 then DATE_TRUNC('year', datum)+365
+               when DATE_PART('year', endoffweek) = DATE_PART('year', datum)
+               then endoffweek else endoffweek+7 end) as "actual_endtoftheweek",
+    DATE_PART('dayofweek', datum) dayofweek,
+    DATE_PART('day', datum) dayofmonth,
+    DATE_PART('dayofyear', datum) dayofyear,
+    --DATE_PART('month', datum) monthofyear,
+    TO_CHAR(datum,'Dy') weekdayofyear,
+    DATE_PART('year', datum)      fiscal_year,
+    trunc(DATE_TRUNC('year', datum) )	startofyear,
+    trunc(DATE_TRUNC('year', datum)+364 )	endofyear
+    from (
+    select 
+    b.datum,
+    case 
+    when DATE_PART('dayofyear', datum) < 6 then 1 
+    when DATE_PART('dayofyear', datum) > 360 and DATE_PART('week', datum+1)=1 and date_part('y',date_trunc('y',datum))%4!=0 then 52
+    when DATE_PART('dayofyear', datum) > 360 and DATE_PART('week', datum+1)=1 and date_part('y',date_trunc('y',datum))%4=0 then 53
+    else DATE_PART('week', datum+1) end weekofyear,
+    DATE_TRUNC('week', datum+1)-1 	startofweek,
+    DATE_TRUNC('week', datum+1)+5 	endoffweek,
+    DATE_TRUNC('qtr', datum) 	startofqtr_old,
+    ADD_MONTHS(DATE_TRUNC('qtr', datum) ,3)-1 endofqtr_old,
+    DATE_TRUNC('mon', datum) 	firstdayofmonth,
+    last_day(datum) 		lastdayofmonth
+    from (
+     select * from (
+     select {} :: DATE + ((row_number() over (order by true))-1) as datum, (row_number() over (order by true))-1 as seq
+    from pg_attribute 
+    ) where date_part('qtr',datum) <= 4
+        and date_part('yr',datum) = {}
+              ) b 
+    ) a 
+    )w
+    """
+    ).format(date_year_input,curr_year)
+    
+    sql_dim_df = spark.read.format("com.databricks.spark.redshift")\
+                    .option("url", url)\
+                    .option("query", date_sql)\
+                    .option("tempdir", temp)\
+                    .option("forward_spark_s3_credentials", True)\
+                    .load()
+    
+    dbtable=f"spot_gla.STG_D_GLA_DT"
+
+    sql_dim_df.write.format("com.databricks.spark.redshift")\
+    .option("url", url)\
+    .option("dbtable", dbtable)\
+    .option("tempdir", temp)\
+    .option("forward_spark_s3_credentials", True)\
+    .mode("overwrite")\
+    .save()
+    
+##Sql Query to populate the stg table before loading the final date dimension table
+##Also determine the rules/logic for quarterday, monthday and yearday
+##this complex SQL used to load the final date dimension based on input date parameter 
+##Only one year will be loaded in onr execution
+    sql_date_dim=(""" with sql_date as (select date_year as "date", date_part('y',date_year) as "year", --dayofyear as yearday, 
+    dayofmonth as "day", 
+    qtr as quarter, 
+    case 
+    when qtr=1 then substring(date_part('y',date_year),3)||' Q1'
+    when qtr=2 then substring(date_part('y',date_year),3)||' Q2'
+    when qtr=3 then substring(date_part('y',date_year),3)||' Q3'
+    when qtr=4 then substring(date_part('y',date_year),3)||' Q4'
+    end as quarterlabel,
+    qtrstart as quarterstartdate,
+    qtrend as quarterenddate,
+    --null as quarterday,--need to investigate 
+    case 
+    when weekofyear <=13 then weekofyear 
+    when weekofyear > 13 and weekofyear <=26 then weekofyear-13
+    when weekofyear > 26 and weekofyear <=39 then weekofyear-26 
+    when weekofyear > 39 and weekofyear <=53 then (case when weekofyear=53 then 52 else weekofyear end)-39
+    end as quarterweek, 
+    case 
+    when weekofyear <=13 then 1 
+    when weekofyear > 13 and weekofyear <=26 then 14
+    when weekofyear > 26 and weekofyear <=39 then 27
+    when weekofyear > 39 and weekofyear <=53 then 40
+    end as quarterstartweek,
+    case 
+    when weekofyear <=13 then 13 
+    when weekofyear > 13 and weekofyear <=26 then 26
+    when weekofyear > 26 and weekofyear <=39 then 39
+    when weekofyear > 39 and weekofyear <=53 then (case when date_part('y',date_trunc('y',date_year))%4=0 then 53 else 52 end)
+    end as quarterendweek ,
+    case 
+    when monthofyear <=3 then monthofyear
+    when monthofyear > 3 and monthofyear <=6 then monthofyear-3
+    when monthofyear > 6 and monthofyear <=9 then monthofyear-6
+    when monthofyear > 9 and monthofyear <=12 then monthofyear-9
+    end as quartermonth,  
+    case 
+    when qtr=1 then 4
+    when qtr=2 then 1
+    when qtr=3 then 2
+    when qtr=4 then 3
+    end as priorquarter,
+    case 
+    when qtr=1 then substring((date_part('y', date_trunc('y',date_year)-10)),3)||' Q4'
+    when qtr=2 then substring(date_part('y',date_year),3)||' Q1'
+    when qtr=3 then substring(date_part('y',date_year),3)||' Q2'
+    when qtr=4 then substring(date_part('y',date_year),3)||' Q3'
+    end as priorquarterlabel,
+    monthofyear as "month",
+    --dayofmonth as monthday, 
+    monthstart as monthstartdate,
+    monthend as monthenddate,
+    case when weekno=5 then 1 else weekno end as monthstartweek,
+    case 
+    when weekno=5 then 5
+    when weekno=6 then 9
+    when weekno=10 then 13
+    when weekno=14 then 18
+    when weekno=19 then 22
+    when weekno=23 then 26
+    when weekno=27 then 31
+    when weekno=32 then 35
+    when weekno=36 then 39
+    when weekno=40 then 44
+    when weekno=45 then 48
+    when weekno=49 then (case when date_part('y',date_trunc('y',date_year))%4=0 then 53 else 52 end) 
+    end monthendweek,
+    weekofyear "week",
+    weekdayofyear as weekday,
+    startofweek as firstdayofweek,
+    endofweek as lastdayofweek,
+    startofweek as weekstartdate,
+    endofweek as weekenddate,
+    case when date_part('y',date_trunc('y',date_year))%4=0 then 53 else 52 end maxweekofyear
+    from 
+    (
+    select stg.*, tmp.monthstart, tmp.monthend , tmp_qtr.qtrstart, tmp_qtr.qtrend
+    from spot_gla.STG_D_GLA_DT Stg, (
+    select monthstart, monthend, x.weekno from (
+    select * from (
+    select 
+    row_number() over (partition by weekno order by endofweek desc) end_rnk ,  weekno, endofweek as monthend
+    from spot_gla.STG_D_GLA_DT q 
+     ) where end_rnk=1
+     ) x, (
+    select * from (
+    select 
+    row_number() over (partition by weekno order by startofweek asc) start_rnk , weekno, startofweek as monthstart
+    from spot_gla.STG_D_GLA_DT q
+     ) where start_rnk=1
+    ) y 
+    where x.weekno=y.weekno
+    ) tmp ,
+    (select h.qtr, k.qtrstart, h.qtrend from 
+    (
+    select * from (
+    select 
+    row_number() over (partition by qtr order by endofweek desc) qtr_end_rnk ,qtr, endofweek as qtrend
+    from spot_gla.STG_D_GLA_DT q 
+    order by date_year) 
+    where qtr_end_rnk=1) h,
+    (
+    select * from (
+    select 
+    row_number() over (partition by qtr order by startofweek asc) qtr_start_rnk , qtr,startofweek as qtrstart
+    from spot_gla.STG_D_GLA_DT q 
+    order by date_year)
+    where qtr_start_rnk=1
+    ) k
+    where h.qtr=k.qtr
+    ) tmp_qtr
+    where stg.weekno=tmp.weekno
+          and stg.qtr=tmp_qtr.qtr
+    order by date_year
+    )), sql_qtrday as (
+    select date_year,
+         case
+         when monthofyear=1 then month_day + first_value(eval_dow) over(partition by monthofyear order by date_year rows between unbounded preceding and unbounded following) 
+         else month_day+1 end MONTHDay,
+         case
+         when qtr=1 then qtr_day + first_value(eval_dow) over(partition by qtr order by date_year rows between unbounded preceding and unbounded following) 
+         else qtr_day+1 end quarterday,
+         case
+         when qtr=1 then year_day + first_value(eval_dow) over(partition by qtr order by date_year rows between unbounded preceding and unbounded following) 
+         else year_day+1 end YEARDay
+     from (
+    select date_year, case when date_part('doy', date_year)=1 and date_part('dow',date_year) = 4 then -2 
+                            when date_part('doy', date_year)=1 and date_part('dow',date_year) = 5 then -1
+                            when date_part('doy', date_year)=1 and date_part('dow',date_year) = 6 then 0
+                            else date_part('dow',date_year)+1 end as eval_dow, 
+                            monthofyear, qtr, 
+                            row_number() over(partition by "monthofyear" order by date_year)-1 as month_day  , 
+                            row_number() over(partition by qtr order by date_year)-1 as qtr_day,
+                            row_number() over(order by date_year)-1 as year_day    
+    from spot_gla.stg_D_GLA_DT  
+    )),
+    sql_final as (
+    select * from sql_date, sql_qtrday where date=date_year)
+    select date,
+    year,
+    yearday,
+    day,
+    quarter,
+    quarterlabel,
+    quarterstartdate,
+    quarterenddate,
+    quarterday,
+    quarterweek,
+    quarterstartweek,
+    quarterendweek,
+    quartermonth,
+    priorquarter,
+    priorquarterlabel,
+    month,
+    monthday,
+    monthstartdate,
+    monthenddate,
+    monthstartweek,
+    monthendweek,
+    week,
+    weekday,
+    firstdayofweek,
+    lastdayofweek,
+    weekstartdate,
+    weekenddate,
+    maxweekofyear
+     from sql_final
+     """).format(curr_year)
+
+############################Create the spark dataframe and also change the datatype to Target compatible format
+    date_df = spark.read.format("com.databricks.spark.redshift")\
+                          .option("url", url)\
+                          .option("query", sql_date_dim)\
+                          .option("tempdir", temp)\
+                          .option("forward_spark_s3_credentials", True)\
+                          .load()
+    date_df = date_df.withColumn("year", date_df["year"].cast(IntegerType()))\
+                 .withColumn("day", date_df["day"].cast(IntegerType()))\
+                 .withColumn("yearday", date_df["yearday"].cast(IntegerType()))\
+                 .withColumn("quarterday", date_df["quarterday"].cast(IntegerType()))\
+                 .withColumn("quarterweek", date_df["quarterweek"].cast(IntegerType()))\
+                 .withColumn("quartermonth", date_df["quartermonth"].cast(IntegerType()))\
+                 .withColumn("month", date_df["month"].cast(IntegerType()))\
+                 .withColumn("monthday", date_df["monthday"].cast(IntegerType()))\
+                 .withColumn("week", date_df["week"].cast(IntegerType()))
+    
+##########Load the the final result set into redshift database with the dataframe
+
+    sql_check=""" select max(year) as year from spot_gla.d_gla_dt where year={} """.format("'"+str(curr_year)+"'")
+    sql_check_df = spark.read.format("com.databricks.spark.redshift")\
+            .option("url", url)\
+            .option("query", sql_check)\
+            .option("tempdir", temp)\
+            .option("forward_spark_s3_credentials", True)\
+            .load()
+    
+    sql_df = sql_check_df.where(sql_check_df.year==curr_year)
+     
+    if sql_df.count()==1:
+      print(str(curr_year)+" Alreday present in D_GLA_DT")
+    if sql_df.count()==0:  
+      dbtable=f"spot_gla.D_GLA_DT"
+      date_df.write.format("com.databricks.spark.redshift")\
+              .option("url", url)\
+              .option("dbtable", dbtable)\
+              .option("tempdir", temp)\
+              .option("forward_spark_s3_credentials", True)\
+              .mode("append")\
+              .save()
+  except Exception as err:
+          print("Audit_log_fetch: {0}".format(str(err)))
+          raise
+
+# COMMAND ----------
+
+# MAGIC %run ./../../../config/spot_audit_log
+
+# COMMAND ----------
+
+spotconfig()
+
+try:
+  ##Based on this list this Notebokk will creat the date dimension and load into Redshift (spot_gla.d_gla_dt)
+  num_records = '365'
+  table_name = "spot_gla.D_GLA_DT"
+  year_list = [2019,2020,2021,2022,2023,2024,2025,2026,2027,2028,2029,2030]
+  for input_yr in year_list:
+    fun_date_dim(input_yr)
+except Exception as err:
+  print("Error encountered")
+  raise str(err)
+
+# COMMAND ----------
+
+dbutils.notebook.exit(json.dumps({"num_records" :num_records, "table_name": table_name}))
